@@ -18,3 +18,18 @@ export async function enqueueCleanupJob(payload: CleanupJobPayload): Promise<voi
     removeOnFail: false,
   });
 }
+
+/** One job per connection enumeration run (initial connect, or resync). See jobs/cloudSyncWorker.ts. */
+export const cloudSyncQueue = new Queue("cloud-sync-jobs", { connection });
+
+export interface CloudSyncJobPayload {
+  syncJobId: string; // sync_jobs.id — worker looks up the connection + cloud_type from Postgres by this id
+}
+
+export async function enqueueCloudSyncJob(payload: CloudSyncJobPayload): Promise<void> {
+  await cloudSyncQueue.add("run-cloud-sync", payload, {
+    attempts: 1, // per-item retries happen inside the worker via runThrottled, not at the job level
+    removeOnComplete: { age: 60 * 60 * 24 * 30 },
+    removeOnFail: false,
+  });
+}

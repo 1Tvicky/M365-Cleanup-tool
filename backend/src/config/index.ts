@@ -10,10 +10,19 @@ export const config = {
 
   azure: {
     clientId: process.env.AZURE_CLIENT_ID ?? "",
-    redirectUri: process.env.AZURE_APP_REDIRECT_URI ?? "",
+    redirectUri: process.env.AZURE_APP_REDIRECT_URI ?? "", // legacy /adminconsent flow — docs/azure-ad-app-registration.md §4
     clientSecret: process.env.AZURE_CLIENT_SECRET,
     certThumbprint: process.env.AZURE_CLIENT_CERT_THUMBPRINT,
     certPrivateKeyPath: process.env.AZURE_CLIENT_CERT_PRIVATE_KEY_PATH,
+    // Add Clouds per-cloud-type connect flow — docs/azure-ad-app-registration.md §4a. Same app
+    // registration/credentials as above, different registered redirect URI.
+    connectRedirectUri: process.env.M365_CONNECT_REDIRECT_URI ?? "",
+  },
+
+  tokenEncryption: {
+    // Base64-encoded 32-byte AES-256 key. Dev-only env value — production must fetch this from a
+    // KMS at startup instead. See services/tokenEncryption.ts.
+    key: process.env.TOKEN_ENCRYPTION_KEY ?? "",
   },
 
   database: {

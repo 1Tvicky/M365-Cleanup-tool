@@ -15,11 +15,15 @@ function getCookie(name: string): string | null {
 }
 
 /**
- * Thin fetch wrapper for the backend API: always sends the session cookie, echoes the CSRF
+ * Fetch wrapper for the backend API: always sends the session cookie, echoes the CSRF
  * double-submit cookie back as a header on state-changing requests (docs/api-spec.md +
  * backend/src/middleware/csrf.ts), and normalizes error responses into ApiClientError.
+ *
+ * Takes a full path (e.g. "/api/v1/auth/login" or "/api/clouds/manage") rather than assuming a
+ * shared prefix — the Add Clouds routes are deliberately mounted outside /api/v1 (see
+ * docs/cloud-connections-api.md), so a hardcoded "/api/v1" prefix here would silently 404 them.
  */
-export async function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+export async function rawFetch<T>(fullPath: string, options: RequestInit = {}): Promise<T> {
   const method = (options.method ?? "GET").toUpperCase();
   const headers = new Headers(options.headers);
 
@@ -31,7 +35,7 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
     headers.set("Content-Type", "application/json");
   }
 
-  const res = await fetch(`/api/v1${path}`, { ...options, method, headers, credentials: "include" });
+  const res = await fetch(fullPath, { ...options, method, headers, credentials: "include" });
 
   if (res.status === 204) return undefined as T;
 
@@ -43,4 +47,9 @@ export async function apiFetch<T>(path: string, options: RequestInit = {}): Prom
   }
 
   return data as T;
+}
+
+/** Convenience wrapper for the versioned API (auth, tenants, cleanup, jobs — everything under /api/v1). */
+export function apiFetch<T>(path: string, options: RequestInit = {}): Promise<T> {
+  return rawFetch<T>(`/api/v1${path}`, options);
 }

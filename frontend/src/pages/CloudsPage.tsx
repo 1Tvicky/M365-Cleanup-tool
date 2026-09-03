@@ -1,26 +1,107 @@
-import { useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { CloudTileGrid } from "../components/clouds/CloudTileGrid";
 import { ManageClouds } from "../components/clouds/ManageClouds";
 import { UserMenu } from "../components/layout/UserMenu";
-import { MOCK_TENANTS, MOCK_JOBS } from "../api/mockData";
+import {
+  disconnectCloudConnection,
+  initCloudConnect,
+  listManageClouds,
+  openConnectPopup,
+  resyncCloudConnection,
+  type ManageCloudsRow,
+} from "../api/clouds";
+import { ApiClientError } from "../api/client";
 import type { OperatorSummary } from "../api/auth";
-import type { Tenant, Workload } from "../types";
+import type { Workload } from "../types";
 
 type Tab = "add" | "manage";
 
+// Any connection in one of these states has an active enumeration job worth polling for.
+function hasLiveWork(rows: ManageCloudsRow[]): boolean {
+  return rows.some((r) => r.status === "connecting" || (r.totalUsers > 0 && r.processedUsers < r.totalUsers));
+}
+
 export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; onLogout: () => void }) {
   const [tab, setTab] = useState<Tab>("add");
-  const [tenants, setTenants] = useState<Tenant[]>(MOCK_TENANTS);
+  const [connections, setConnections] = useState<ManageCloudsRow[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [connectingType, setConnectingType] = useState<Workload | null>(null);
+  const [resyncingId, setResyncingId] = useState<string | null>(null);
   const [toast, setToast] = useState<string | null>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  function handleConnect(workload: Workload) {
-    // In production this calls GET /api/v1/auth/consent-url and redirects the browser there.
-    setToast(`Redirecting to Microsoft admin consent for ${workload}…`);
-    setTimeout(() => setToast(null), 2500);
+  const refresh = useCallback(async () => {
+    try {
+      const { connections: rows } = await listManageClouds();
+      setConnections(rows);
+    } catch {
+      // A poll tick failing silently is fine — the next one retries; only the initial load shows an error state.
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    refresh();
+  }, [refresh]);
+
+  // Polls while any connection has an in-progress enumeration job, so the progress bar/percent
+  // actually moves without the operator manually refreshing — matches the reference product's
+  // "job continues running after the row appears" behavior.
+  useEffect(() => {
+    if (pollRef.current) clearInterval(pollRef.current);
+    if (hasLiveWork(connections)) {
+      pollRef.current = setInterval(refresh, 3000);
+    }
+    return () => {
+      if (pollRef.current) clearInterval(pollRef.current);
+    };
+  }, [connections, refresh]);
+
+  function showToast(message: string) {
+    setToast(message);
+    setTimeout(() => setToast(null), 3000);
   }
 
-  function handleDisconnect(tenantId: string) {
-    setTenants((prev) => prev.map((t) => (t.id === tenantId ? { ...t, status: "disconnected" } : t)));
+  async function handleConnect(workload: Workload) {
+    if (connectingType) return;
+    setConnectingType(workload);
+    try {
+      const { authorizeUrl } = await initCloudConnect(workload);
+      const result = await openConnectPopup(authorizeUrl);
+      if (result.status === "success") {
+        showToast("Connected — enumeration is running in the background.");
+        setTab("manage");
+        await refresh();
+      } else if (result.reason !== "closed") {
+        showToast(`Couldn't connect: ${result.reason}`);
+      }
+    } catch (err) {
+      showToast(err instanceof ApiClientError ? err.message : "Couldn't start the connection. Try again.");
+    } finally {
+      setConnectingType(null);
+    }
+  }
+
+  async function handleResync(connectionId: string) {
+    setResyncingId(connectionId);
+    try {
+      await resyncCloudConnection(connectionId);
+      await refresh();
+    } catch (err) {
+      showToast(err instanceof ApiClientError ? err.message : "Couldn't start a resync.");
+    } finally {
+      setResyncingId(null);
+    }
+  }
+
+  async function handleDisconnect(connectionId: string) {
+    try {
+      await disconnectCloudConnection(connectionId);
+      await refresh();
+    } catch (err) {
+      showToast(err instanceof ApiClientError ? err.message : "Couldn't disconnect.");
+    }
   }
 
   return (
@@ -37,9 +118,11 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
 
       <div className="px-8 py-6">
         {tab === "add" ? (
-          <CloudTileGrid onConnect={handleConnect} />
+          <CloudTileGrid onConnect={handleConnect} connectingType={connectingType} />
+        ) : loading ? (
+          <p className="text-sm text-slate-500">Loading…</p>
         ) : (
-          <ManageClouds tenants={tenants} jobs={MOCK_JOBS} onDisconnect={handleDisconnect} />
+          <ManageClouds connections={connections} onResync={handleResync} onDisconnect={handleDisconnect} resyncingId={resyncingId} />
         )}
       </div>
 

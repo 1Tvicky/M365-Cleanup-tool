@@ -9,6 +9,7 @@ import { tenantsRouter } from "./routes/tenants.js";
 import { discoveryRouter } from "./routes/discovery.js";
 import { cleanupRouter } from "./routes/cleanup.js";
 import { jobsRouter } from "./routes/jobs.js";
+import { cloudConnectionsRouter, m365ConnectCallbackRouter } from "./routes/cloudConnections.js";
 import { ApiError } from "./types/index.js";
 
 export const app = express();
@@ -36,6 +37,12 @@ app.use("/api/v1/tenants", tenantsRouter);
 app.use("/api/v1", discoveryRouter); // mounts /tenants/:tenantId/{users,teams,sites}
 app.use("/api/v1", cleanupRouter); // mounts /tenants/:tenantId/cleanup/*
 app.use("/api/v1", jobsRouter); // mounts /jobs/* and /tenants/:tenantId/{jobs,reports}
+
+// Add Clouds / Manage Clouds connection layer — deliberately NOT under /api/v1: /api/clouds/* is
+// this feature's own contract (docs/cloud-connections-api.md), and the callback path below must
+// match the Azure AD app registration's redirect URI exactly (docs/azure-ad-app-registration.md §4a).
+app.use("/api/clouds", cloudConnectionsRouter);
+app.use("/api/auth/m365/callback", m365ConnectCallbackRouter);
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ApiError) {
