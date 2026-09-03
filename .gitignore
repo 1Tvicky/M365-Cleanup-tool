@@ -1,0 +1,27 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+build/
+
+# Local dev services (portable Postgres/Redis binaries + live data dir — not source, huge)
+devservices/
+
+# Environment files — never commit secrets, even dev-only ones
+.env
+.env.local
+*.env
+
+# Logs
+*.log
+npm-debug.log*
+
+# Editor/OS
+.vscode/
+.DS_Store
+Thumbs.db
+
+# Test/coverage output
+coverage/
+*.tsbuildinfo
