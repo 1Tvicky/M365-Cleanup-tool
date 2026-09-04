@@ -144,8 +144,8 @@ export interface CleaningSyncOperation {
   startedAt: string;
   completedAt: string | null;
   byResource: {
-    onedrive?: { status: CleaningSyncResourceStatus; error: string | null };
-    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null };
-    teams?: { status: CleaningSyncResourceStatus; error: string | null };
+    onedrive?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
+    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
+    teams?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
   };
 }

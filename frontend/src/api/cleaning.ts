@@ -238,9 +238,9 @@ export interface CleaningSyncOperation {
   startedAt: string;
   completedAt: string | null;
   byResource: {
-    onedrive?: { status: CleaningSyncResourceStatus; error: string | null };
-    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null };
-    teams?: { status: CleaningSyncResourceStatus; error: string | null };
+    onedrive?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
+    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
+    teams?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
   };
 }
 
@@ -250,4 +250,13 @@ export function startSync(connectionIds: string[]): Promise<{ operationId: strin
 
 export function getSyncOperation(operationId: string): Promise<CleaningSyncOperation> {
   return rawFetch(`/api/cleaning/sync/operations/${operationId}`);
+}
+
+/**
+ * The most recent sync for this tenant, if any — lets the Dashboard resume tracking a sync after
+ * navigating away and back (or reloading), since sync progress otherwise only ever lived in the
+ * Dashboard component's local state and was lost the moment it unmounted.
+ */
+export function getLatestSyncOperation(connectionIds: string[]): Promise<{ operation: CleaningSyncOperation | null }> {
+  return rawFetch(`/api/cleaning/sync/latest?connectionIds=${connectionIds.join(",")}`);
 }

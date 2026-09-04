@@ -1136,15 +1136,70 @@ async function requireSyncOperationAccess(operationId: string, operatorId: strin
 async function fetchSubResourceStatus(
   table: "sync_jobs" | "cleaning_scans",
   id: string
-): Promise<{ status: string; finishedAt: string | null; error: string | null }> {
-  const result = await query<{ status: string; finished_at: string | null; error_log: { message: string }[] }>(
-    `SELECT status, finished_at, error_log FROM ${table} WHERE id = $1`,
+): Promise<{ status: string; finishedAt: string | null; error: string | null; processed: number; total: number }> {
+  const processedCol = table === "sync_jobs" ? "processed_users" : "processed_items";
+  const totalCol = table === "sync_jobs" ? "total_users" : "total_items";
+  const result = await query<{ status: string; finished_at: string | null; error_log: { message: string }[]; processed: number; total: number }>(
+    `SELECT status, finished_at, error_log, ${processedCol} AS processed, ${totalCol} AS total FROM ${table} WHERE id = $1`,
     [id]
   );
   const row = result.rows[0]!;
   const errorLog = Array.isArray(row.error_log) ? row.error_log : [];
-  return { status: row.status, finishedAt: row.finished_at, error: errorLog.length > 0 ? errorLog[errorLog.length - 1]!.message : null };
+  return {
+    status: row.status,
+    finishedAt: row.finished_at,
+    error: errorLog.length > 0 ? errorLog[errorLog.length - 1]!.message : null,
+    processed: row.processed,
+    total: row.total,
+  };
 }
+
+interface SyncOperationRow {
+  id: string;
+  started_at: string;
+  onedrive_sync_job_id: string | null;
+  sharepoint_sync_job_id: string | null;
+  teams_scan_id: string | null;
+}
+
+/** Shared by GET /sync/operations/:id and GET /sync/latest — computes the unified view live from whichever sub-resources this operation actually touched. */
+async function buildSyncOperationResult(op: SyncOperationRow): Promise<CleaningSyncOperation> {
+  const byResource: CleaningSyncOperation["byResource"] = {};
+  const subStatuses: string[] = [];
+  let completedAt: string | null = null;
+  const noteCompletion = (finishedAt: string | null) => {
+    if (finishedAt) completedAt = !completedAt || finishedAt > completedAt ? finishedAt : completedAt;
+  };
+
+  if (op.onedrive_sync_job_id) {
+    const r = await fetchSubResourceStatus("sync_jobs", op.onedrive_sync_job_id);
+    byResource.onedrive = { status: r.status as CleaningSyncResourceStatus, error: r.error, processed: r.processed, total: r.total };
+    subStatuses.push(r.status);
+    noteCompletion(r.finishedAt);
+  }
+  if (op.sharepoint_sync_job_id) {
+    const r = await fetchSubResourceStatus("sync_jobs", op.sharepoint_sync_job_id);
+    byResource.sharepoint = { status: r.status as CleaningSyncResourceStatus, error: r.error, processed: r.processed, total: r.total };
+    subStatuses.push(r.status);
+    noteCompletion(r.finishedAt);
+  }
+  if (op.teams_scan_id) {
+    const r = await fetchSubResourceStatus("cleaning_scans", op.teams_scan_id);
+    byResource.teams = { status: r.status as CleaningSyncResourceStatus, error: r.error, processed: r.processed, total: r.total };
+    subStatuses.push(r.status);
+    noteCompletion(r.finishedAt);
+  }
+
+  return {
+    id: op.id,
+    status: computeSyncStatus(subStatuses),
+    startedAt: op.started_at,
+    completedAt,
+    byResource,
+  };
+}
+
+const SYNC_OPERATION_COLUMNS = "id, started_at, onedrive_sync_job_id, sharepoint_sync_job_id, teams_scan_id";
 
 /** GET /api/cleaning/sync/operations/:operationId — unified status, computed live from whichever sub-resources this operation actually touched. */
 cleaningRouter.get(
@@ -1152,47 +1207,42 @@ cleaningRouter.get(
   asyncHandler(async (req, res) => {
     await requireSyncOperationAccess(req.params.operationId!, req.session!.operatorId);
 
-    const opResult = await query<{
-      id: string; started_at: string; onedrive_sync_job_id: string | null; sharepoint_sync_job_id: string | null; teams_scan_id: string | null;
-    }>(
-      `SELECT id, started_at, onedrive_sync_job_id, sharepoint_sync_job_id, teams_scan_id FROM cleaning_sync_operations WHERE id = $1`,
-      [req.params.operationId]
+    const opResult = await query<SyncOperationRow>(`SELECT ${SYNC_OPERATION_COLUMNS} FROM cleaning_sync_operations WHERE id = $1`, [
+      req.params.operationId,
+    ]);
+    res.json(await buildSyncOperationResult(opResult.rows[0]!));
+  })
+);
+
+/**
+ * GET /api/cleaning/sync/latest?connectionIds=a,b,c — the most recent sync for this tenant, if any.
+ * Lets the Cleaning page resume tracking a sync after navigating away and back (or reloading) —
+ * without this, sync progress/status only ever lived in the Dashboard component's local state and
+ * was lost the moment it unmounted, even though the sync itself kept running server-side.
+ */
+cleaningRouter.get(
+  "/sync/latest",
+  asyncHandler(async (req, res) => {
+    const raw = typeof req.query.connectionIds === "string" ? req.query.connectionIds : "";
+    const connectionIds = [...new Set(raw.split(",").map((s) => s.trim()).filter(Boolean))];
+    if (connectionIds.length === 0) {
+      res.json({ operation: null });
+      return;
+    }
+
+    const operatorId = req.session!.operatorId;
+    const accessResults = await Promise.all(connectionIds.map((id) => requireConnectionAccess(id, operatorId)));
+    const tenantIds = new Set(accessResults.map((r) => r.tenantId));
+    if (tenantIds.size > 1) {
+      throw new ApiError(400, "TENANT_MISMATCH", "Selected connections belong to more than one Microsoft 365 tenant");
+    }
+    const tenantId = accessResults[0]!.tenantId;
+
+    const opResult = await query<SyncOperationRow>(
+      `SELECT ${SYNC_OPERATION_COLUMNS} FROM cleaning_sync_operations WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1`,
+      [tenantId]
     );
-    const op = opResult.rows[0]!;
-
-    const byResource: CleaningSyncOperation["byResource"] = {};
-    const subStatuses: string[] = [];
-    let completedAt: string | null = null;
-    const noteCompletion = (finishedAt: string | null) => {
-      if (finishedAt) completedAt = !completedAt || finishedAt > completedAt ? finishedAt : completedAt;
-    };
-
-    if (op.onedrive_sync_job_id) {
-      const r = await fetchSubResourceStatus("sync_jobs", op.onedrive_sync_job_id);
-      byResource.onedrive = { status: r.status as CleaningSyncResourceStatus, error: r.error };
-      subStatuses.push(r.status);
-      noteCompletion(r.finishedAt);
-    }
-    if (op.sharepoint_sync_job_id) {
-      const r = await fetchSubResourceStatus("sync_jobs", op.sharepoint_sync_job_id);
-      byResource.sharepoint = { status: r.status as CleaningSyncResourceStatus, error: r.error };
-      subStatuses.push(r.status);
-      noteCompletion(r.finishedAt);
-    }
-    if (op.teams_scan_id) {
-      const r = await fetchSubResourceStatus("cleaning_scans", op.teams_scan_id);
-      byResource.teams = { status: r.status as CleaningSyncResourceStatus, error: r.error };
-      subStatuses.push(r.status);
-      noteCompletion(r.finishedAt);
-    }
-
-    const result: CleaningSyncOperation = {
-      id: op.id,
-      status: computeSyncStatus(subStatuses),
-      startedAt: op.started_at,
-      completedAt,
-      byResource,
-    };
-    res.json(result);
+    const op = opResult.rows[0];
+    res.json({ operation: op ? await buildSyncOperationResult(op) : null });
   })
 );

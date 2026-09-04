@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   calculateTeamsMessageCounts,
+  getLatestSyncOperation,
   getSyncOperation,
   getTeamsSummary,
   listCleaningConnections,
@@ -363,12 +364,13 @@ function ServiceCard({ icon, name, stats, action, onClick, disabled }: { icon: s
   );
 }
 
-/** ✓ / ⏳ / ✗ for one resource's sync sub-status — used only while the "Sync Now" progress row is visible. */
-function syncResourceIcon(status: CleaningSyncResourceStatus | undefined): string {
-  if (!status) return "";
-  if (status === "queued" || status === "running") return "⏳";
-  if (status === "completed") return "✓";
-  return "✗";
+/** ✓ / ⏳ / ✗ plus a running "X of Y" count while in flight, e.g. "⏳ 432/785" — so there's at least a concrete sense of how much is left, not just a spinner with no scale. */
+function syncResourceLabel(r: { status: CleaningSyncResourceStatus; processed: number; total: number } | undefined): string {
+  if (!r) return "";
+  const isLive = r.status === "queued" || r.status === "running";
+  const icon = isLive ? "⏳" : r.status === "completed" ? "✓" : "✗";
+  const progress = isLive && r.total > 0 ? ` ${r.processed.toLocaleString()}/${r.total.toLocaleString()}` : "";
+  return `${icon}${progress}`;
 }
 
 function Dashboard({
@@ -422,6 +424,28 @@ function Dashboard({
   }
 
   const isSyncing = syncOperationId != null && (!syncOperation || syncOperation.status === "queued" || syncOperation.status === "running");
+
+  // Checks whether a sync is already running (or just finished) for this tenant whenever this
+  // component mounts — without this, sync progress only ever lived in this component's own state,
+  // so navigating away and back (or reloading) made an in-progress sync look "stopped" even though
+  // it kept running server-side. Resumes polling if still in flight; if it already finished, syncs
+  // this component's display and tells the parent to refresh lastSyncedAt/reconcile the selection.
+  useEffect(() => {
+    const connectionIds = [group.onedrive?.id, group.sharepoint?.id, group.teams?.id].filter((id): id is string => Boolean(id));
+    if (connectionIds.length === 0) return;
+    getLatestSyncOperation(connectionIds)
+      .then(({ operation }) => {
+        if (!operation) return;
+        if (operation.status === "queued" || operation.status === "running") {
+          setSyncOperationId(operation.id);
+        } else {
+          setSyncOperation(operation);
+          onSyncFinished();
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [group.onedrive?.id, group.sharepoint?.id, group.teams?.id]);
 
   // Polls (same 3s self-rearming pattern as the Teams summary poll below) while the sync is in
   // flight, then refreshes this dashboard's own totals and tells the parent page to re-check
@@ -486,9 +510,9 @@ function Dashboard({
           </button>
           {isSyncing && syncOperation && (
             <div className="flex gap-2 text-xs text-slate-500">
-              {group.onedrive && <span>OneDrive {syncResourceIcon(syncOperation.byResource.onedrive?.status)}</span>}
-              {group.sharepoint && <span>SharePoint {syncResourceIcon(syncOperation.byResource.sharepoint?.status)}</span>}
-              {group.teams && <span>Teams {syncResourceIcon(syncOperation.byResource.teams?.status)}</span>}
+              {group.onedrive && <span>OneDrive {syncResourceLabel(syncOperation.byResource.onedrive)}</span>}
+              {group.sharepoint && <span>SharePoint {syncResourceLabel(syncOperation.byResource.sharepoint)}</span>}
+              {group.teams && <span>Teams {syncResourceLabel(syncOperation.byResource.teams)}</span>}
             </div>
           )}
           {!isSyncing && syncOperation && syncOperation.status === "completed" && (
