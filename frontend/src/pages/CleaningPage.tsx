@@ -365,12 +365,20 @@ function ServiceCard({ icon, name, stats, action, onClick, disabled }: { icon: s
 }
 
 /** ✓ / ⏳ / ✗ plus a running "X of Y" count while in flight, e.g. "⏳ 432/785" — so there's at least a concrete sense of how much is left, not just a spinner with no scale. */
-function syncResourceLabel(r: { status: CleaningSyncResourceStatus; processed: number; total: number } | undefined): string {
+function syncResourceLabel(
+  r: { status: CleaningSyncResourceStatus; processed: number; total: number; unavailableCount?: number } | undefined
+): string {
   if (!r) return "";
   const isLive = r.status === "queued" || r.status === "running";
-  const icon = isLive ? "⏳" : r.status === "completed" ? "✓" : "✗";
-  const progress = isLive && r.total > 0 ? ` ${r.processed.toLocaleString()}/${r.total.toLocaleString()}` : "";
-  return `${icon}${progress}`;
+  if (isLive) return r.total > 0 ? `⏳ ${r.processed.toLocaleString()}/${r.total.toLocaleString()}` : "⏳";
+  if (r.status === "completed") return "✓";
+  if (r.status === "completed_with_errors") {
+    // "completed_with_errors" here almost always just means some accounts have no provisioned
+    // drive, or Microsoft blocked access to a specific site — not that the sync itself broke. A
+    // plain ✗ would read as "this failed", so use a warning instead and say how many, when known.
+    return r.unavailableCount ? `⚠ ${r.unavailableCount.toLocaleString()} unavailable` : "⚠";
+  }
+  return "✗"; // genuinely 'failed' or 'cancelled' — the sync job itself didn't complete
 }
 
 function Dashboard({

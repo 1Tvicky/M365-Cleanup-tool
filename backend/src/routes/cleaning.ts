@@ -1136,13 +1136,12 @@ async function requireSyncOperationAccess(operationId: string, operatorId: strin
 async function fetchSubResourceStatus(
   table: "sync_jobs" | "cleaning_scans",
   id: string
-): Promise<{ status: string; finishedAt: string | null; error: string | null; processed: number; total: number }> {
+): Promise<{ status: string; finishedAt: string | null; error: string | null; processed: number; total: number; connectionId: string }> {
   const processedCol = table === "sync_jobs" ? "processed_users" : "processed_items";
   const totalCol = table === "sync_jobs" ? "total_users" : "total_items";
-  const result = await query<{ status: string; finished_at: string | null; error_log: { message: string }[]; processed: number; total: number }>(
-    `SELECT status, finished_at, error_log, ${processedCol} AS processed, ${totalCol} AS total FROM ${table} WHERE id = $1`,
-    [id]
-  );
+  const result = await query<{
+    status: string; finished_at: string | null; error_log: { message: string }[]; processed: number; total: number; connection_id: string;
+  }>(`SELECT status, finished_at, error_log, ${processedCol} AS processed, ${totalCol} AS total, connection_id FROM ${table} WHERE id = $1`, [id]);
   const row = result.rows[0]!;
   const errorLog = Array.isArray(row.error_log) ? row.error_log : [];
   return {
@@ -1151,7 +1150,23 @@ async function fetchSubResourceStatus(
     error: errorLog.length > 0 ? errorLog[errorLog.length - 1]!.message : null,
     processed: row.processed,
     total: row.total,
+    connectionId: row.connection_id,
   };
+}
+
+/**
+ * "completed_with_errors" for a OneDrive/SharePoint sync_jobs row almost always just means some
+ * accounts have no provisioned drive (never touched OneDrive) or Graph reported a tenant-side
+ * access block for that specific site — not that the sync mechanism itself broke. Surfacing this
+ * count (rather than a bare "some errors" or, worse, a plain X implying total failure) is what lets
+ * the Cleaning page explain that distinction instead of alarming the user over normal per-account
+ * gaps in the data.
+ */
+async function countUnavailable(connectionId: string): Promise<number> {
+  const result = await query<{ count: string }>(`SELECT COUNT(*) FROM connection_users WHERE connection_id = $1 AND sync_status = 'failed'`, [
+    connectionId,
+  ]);
+  return Number(result.rows[0]!.count);
 }
 
 interface SyncOperationRow {
@@ -1173,13 +1188,25 @@ async function buildSyncOperationResult(op: SyncOperationRow): Promise<CleaningS
 
   if (op.onedrive_sync_job_id) {
     const r = await fetchSubResourceStatus("sync_jobs", op.onedrive_sync_job_id);
-    byResource.onedrive = { status: r.status as CleaningSyncResourceStatus, error: r.error, processed: r.processed, total: r.total };
+    byResource.onedrive = {
+      status: r.status as CleaningSyncResourceStatus,
+      error: r.error,
+      processed: r.processed,
+      total: r.total,
+      unavailableCount: await countUnavailable(r.connectionId),
+    };
     subStatuses.push(r.status);
     noteCompletion(r.finishedAt);
   }
   if (op.sharepoint_sync_job_id) {
     const r = await fetchSubResourceStatus("sync_jobs", op.sharepoint_sync_job_id);
-    byResource.sharepoint = { status: r.status as CleaningSyncResourceStatus, error: r.error, processed: r.processed, total: r.total };
+    byResource.sharepoint = {
+      status: r.status as CleaningSyncResourceStatus,
+      error: r.error,
+      processed: r.processed,
+      total: r.total,
+      unavailableCount: await countUnavailable(r.connectionId),
+    };
     subStatuses.push(r.status);
     noteCompletion(r.finishedAt);
   }

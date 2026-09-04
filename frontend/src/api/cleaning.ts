@@ -238,8 +238,10 @@ export interface CleaningSyncOperation {
   startedAt: string;
   completedAt: string | null;
   byResource: {
-    onedrive?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
-    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
+    // unavailableCount: how many accounts/sites have no provisioned drive or hit a Graph-reported
+    // access block — "completed_with_errors" almost always means this, not that sync itself broke.
+    onedrive?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
+    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
     teams?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
   };
 }

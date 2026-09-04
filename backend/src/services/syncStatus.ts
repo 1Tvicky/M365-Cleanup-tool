@@ -12,8 +12,12 @@ export function computeSyncStatus(subStatuses: string[]): CleaningSyncOperationS
   if (subStatuses.some((s) => s === "queued" || s === "running")) {
     return subStatuses.every((s) => s === "queued") ? "queued" : "running";
   }
-  const unsuccessful = subStatuses.filter((s) => s === "failed" || s === "cancelled").length;
-  if (unsuccessful === subStatuses.length) return "failed";
-  if (unsuccessful > 0) return "completed_with_errors";
+  // A sub-resource ending "completed_with_errors" (e.g. some OneDrive accounts have no provisioned
+  // drive) still means the overall sync wasn't fully clean — it must count toward the "some issues"
+  // bucket below, not be silently treated the same as a clean "completed".
+  const fullyFailed = subStatuses.filter((s) => s === "failed" || s === "cancelled").length;
+  if (fullyFailed === subStatuses.length) return "failed";
+  const anyIssues = subStatuses.some((s) => s === "failed" || s === "cancelled" || s === "completed_with_errors");
+  if (anyIssues) return "completed_with_errors";
   return "completed";
 }

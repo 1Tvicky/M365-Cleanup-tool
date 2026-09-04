@@ -27,8 +27,17 @@ describe("computeSyncStatus", () => {
     expect(computeSyncStatus(["completed", "cancelled", "completed"])).toBe("completed_with_errors");
   });
 
+  it("returns 'completed_with_errors' when a sub-resource itself finished 'completed_with_errors' — e.g. OneDrive accounts with no provisioned drive — not a clean 'completed'", () => {
+    expect(computeSyncStatus(["completed_with_errors"])).toBe("completed_with_errors");
+    expect(computeSyncStatus(["completed", "completed_with_errors"])).toBe("completed_with_errors");
+  });
+
   it("returns 'failed' when every sub-resource ended unsuccessfully", () => {
     expect(computeSyncStatus(["failed"])).toBe("failed");
     expect(computeSyncStatus(["failed", "cancelled"])).toBe("failed");
+  });
+
+  it("does not return 'failed' just because one sub-resource had partial errors alongside a fully failed one", () => {
+    expect(computeSyncStatus(["failed", "completed_with_errors"])).toBe("completed_with_errors");
   });
 });
