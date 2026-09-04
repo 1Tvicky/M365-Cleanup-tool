@@ -25,9 +25,11 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
   const [tab, setTab] = useState<Tab>("add");
   const [connections, setConnections] = useState<ManageCloudsRow[]>([]);
   const [loading, setLoading] = useState(true);
-  const [connectingType, setConnectingType] = useState<Workload | null>(null);
+  // A Set, not a single value: onboarding one cloud (e.g. OneDrive) must not block starting
+  // another (e.g. SharePoint/Teams) — each tile only cares whether IT is mid-connect.
+  const [connectingTypes, setConnectingTypes] = useState<Set<Workload>>(new Set());
   const [resyncingId, setResyncingId] = useState<string | null>(null);
-  const [toast, setToast] = useState<string | null>(null);
+  const [toast, setToast] = useState<{ message: string; ok: boolean } | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -58,17 +60,17 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
     };
   }, [connections, refresh]);
 
-  function showToast(message: string) {
-    setToast(message);
-    setTimeout(() => setToast(null), 3000);
+  function showToast(message: string, ok = false) {
+    setToast({ message, ok });
+    setTimeout(() => setToast(null), 4000);
   }
 
   async function handleConnect(workload: Workload) {
-    if (connectingType) return;
-    setConnectingType(workload);
+    if (connectingTypes.has(workload)) return; // re-clicking the SAME tile mid-connect is a no-op; other tiles are unaffected
+    setConnectingTypes((prev) => new Set(prev).add(workload));
     try {
       const { authorizeUrl } = await initCloudConnect(workload);
-      const result = await openConnectPopup(authorizeUrl);
+      const result = await openConnectPopup(authorizeUrl, workload);
       // The popup's postMessage handshake back to this window depends on the browser preserving
       // window.opener across Microsoft's entire real login+consent page sequence, which we don't
       // control and can't fully verify — a "closed" result here is ambiguous, not necessarily a
@@ -78,7 +80,7 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
       // the message got through.
       await refresh();
       if (result.status === "success") {
-        showToast("Connected — enumeration is running in the background.");
+        showToast("Account added successfully.", true);
         setTab("manage");
       } else if (result.reason !== "closed") {
         showToast(`Couldn't connect: ${result.reason}`);
@@ -88,7 +90,11 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
     } catch (err) {
       showToast(err instanceof ApiClientError ? err.message : "Couldn't start the connection. Try again.");
     } finally {
-      setConnectingType(null);
+      setConnectingTypes((prev) => {
+        const next = new Set(prev);
+        next.delete(workload);
+        return next;
+      });
     }
   }
 
@@ -127,7 +133,7 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
 
       <div className="px-8 py-6">
         {tab === "add" ? (
-          <CloudTileGrid onConnect={handleConnect} connectingType={connectingType} />
+          <CloudTileGrid onConnect={handleConnect} connectingTypes={connectingTypes} />
         ) : loading ? (
           <p className="text-sm text-slate-500">Loading…</p>
         ) : (
@@ -136,8 +142,20 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
       </div>
 
       {toast && (
-        <div className="fixed bottom-6 right-6 rounded-lg bg-slate-900 px-4 py-2.5 text-sm text-white shadow-lg">
-          {toast}
+        <div
+          className={`fixed right-6 top-20 flex items-center gap-3 rounded-md border-l-4 px-5 py-3 text-sm font-medium shadow-lg ${
+            toast.ok ? "border-emerald-500 bg-emerald-50 text-emerald-800" : "border-rose-500 bg-rose-50 text-rose-800"
+          }`}
+        >
+          {toast.ok && (
+            <span className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full bg-emerald-500 text-white">
+              ✓
+            </span>
+          )}
+          <span>{toast.message}</span>
+          <button onClick={() => setToast(null)} aria-label="Dismiss" className="ml-2 text-current opacity-60 hover:opacity-100">
+            ✕
+          </button>
         </div>
       )}
     </div>

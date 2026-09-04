@@ -71,9 +71,13 @@ export function disconnectCloudConnection(connectionId: string): Promise<void> {
  * without completing). Mirrors the reference product's popup-based connect flow — see
  * docs/azure-ad-app-registration.md §4a.
  */
-export function openConnectPopup(authorizeUrl: string): Promise<M365ConnectMessage> {
+export function openConnectPopup(authorizeUrl: string, cloudType: CloudType): Promise<M365ConnectMessage> {
   return new Promise((resolve) => {
-    const popup = window.open(authorizeUrl, "m365-connect", "width=500,height=680,menubar=no,toolbar=no");
+    // Name must be unique per in-flight connect: window.open reuses/navigates an existing window
+    // with the same name instead of opening a new one, which would silently hijack an already-open
+    // popup (e.g. OneDrive's) the moment a second connect (e.g. SharePoint) was started.
+    const windowName = `m365-connect-${cloudType}-${Date.now()}`;
+    const popup = window.open(authorizeUrl, windowName, "width=500,height=680,menubar=no,toolbar=no");
 
     function cleanup() {
       window.removeEventListener("message", onMessage);

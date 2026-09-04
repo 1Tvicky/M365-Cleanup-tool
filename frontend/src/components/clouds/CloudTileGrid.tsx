@@ -25,10 +25,10 @@ const ACCENTS: Record<Workload, { button: string; label: string }> = {
  */
 export function CloudTileGrid({
   onConnect,
-  connectingType,
+  connectingTypes,
 }: {
   onConnect: (workload: Workload) => void;
-  connectingType: Workload | null;
+  connectingTypes: Set<Workload>;
 }) {
   return (
     <div className="rounded-lg border border-slate-200 bg-white px-7 py-7">
@@ -37,7 +37,7 @@ export function CloudTileGrid({
         {CONNECTORS.map((c) => {
           const Icon = ICONS[c.id];
           const accent = ACCENTS[c.id];
-          const isConnecting = connectingType === c.id;
+          const isConnecting = connectingTypes.has(c.id);
           return (
             <div
               key={c.id}
@@ -47,7 +47,7 @@ export function CloudTileGrid({
               <span className={`text-center text-sm font-semibold leading-tight ${accent.label}`}>{c.label}</span>
               <button
                 onClick={() => onConnect(c.id)}
-                disabled={connectingType !== null}
+                disabled={isConnecting}
                 className={`mt-auto w-full rounded-md py-1.5 text-xs font-semibold text-white transition-opacity disabled:cursor-not-allowed ${
                   isConnecting ? "opacity-100" : "opacity-0 group-hover:opacity-100 group-hover:enabled:hover:opacity-90"
                 }`}

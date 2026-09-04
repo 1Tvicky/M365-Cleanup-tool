@@ -121,6 +121,44 @@ cloudConnectionsRouter.get(
 );
 
 /**
+ * GET /api/clouds/:id/status — lightweight polling target for the OAuth popup itself (see
+ * popupResultPage below): same-origin, same browser, so the operator's session cookie is sent
+ * automatically. Lets the popup show real enumeration progress instead of declaring "connected"
+ * the instant the token exchange finishes, before any users have actually been discovered.
+ */
+cloudConnectionsRouter.get(
+  "/:id/status",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+
+    const result = await query<{
+      status: ManageCloudsRow["status"];
+      job_status: string | null;
+      total_users: number | null;
+      processed_users: number | null;
+    }>(
+      `SELECT c.status,
+              sj.status AS job_status, sj.total_users, sj.processed_users
+       FROM connections c
+       LEFT JOIN sync_jobs sj ON sj.connection_id = c.id
+       WHERE c.id = $1
+       ORDER BY sj.created_at DESC NULLS LAST
+       LIMIT 1`,
+      [req.params.id]
+    );
+    const row = result.rows[0];
+    if (!row) throw new ApiError(404, "CONNECTION_NOT_FOUND", "No such connection");
+
+    res.json({
+      connectionStatus: row.status,
+      job: row.job_status
+        ? { status: row.job_status, totalUsers: row.total_users ?? 0, processedUsers: row.processed_users ?? 0 }
+        : null,
+    });
+  })
+);
+
+/**
  * GET /api/clouds/:id/users — backs the expand chevron's "Failed Users Details" drill-in.
  * `?status=failed` filters to just the not-added users (the common case from the UI); omit for
  * the full list.
@@ -318,6 +356,60 @@ function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: Cloud
 </body></html>`;
 }
 
+/**
+ * Success-path popup: the reference product's OAuth popup shows a spinner ("Your X authentication
+ * is in progress....") for the full duration of enumeration, not just the OAuth exchange itself —
+ * closing only once the sync job has actually finished, so Manage Clouds is already at its settled
+ * state (not a live-ticking 0%) the moment the popup goes away. Our token exchange already
+ * completed by the time this renders, so this polls the just-created connection's own sync job
+ * status (same-origin, same browser — the operator's session cookie is sent automatically) instead
+ * of re-deriving progress some other way.
+ */
+function popupProgressPage(opts: { connectionId: string; cloudType: CloudType; payload: unknown; nonce: string }): string {
+  const label = CLOUD_TYPE_LABELS[opts.cloudType];
+  const payloadJson = JSON.stringify(opts.payload).replace(/</g, "\\u003c");
+  const connectionIdJson = JSON.stringify(opts.connectionId).replace(/</g, "\\u003c");
+
+  return `<!doctype html><html><head><meta charset="utf-8"><title>CloudFuze</title></head>
+<body style="margin:0;font-family:-apple-system,Segoe UI,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#fff;">
+  <div style="text-align:center;max-width:320px;padding:24px;">
+    <div style="font-weight:700;font-size:22px;color:#1b2fc4;margin-bottom:20px;">CloudFuze</div>
+    <div id="msg" style="font-weight:600;font-size:16px;color:#1e293b;margin-bottom:28px;">Your ${label} authentication is in progress....</div>
+    <div id="spinner" style="width:56px;height:56px;margin:0 auto;border-radius:50%;border:5px solid #dbeafe;border-top-color:#1b2fc4;animation:spin 0.9s linear infinite;"></div>
+    <div id="done" style="display:none;width:48px;height:48px;margin:0 auto;border-radius:50%;border:3px solid #1b2fc4;align-items:center;justify-content:center;color:#1b2fc4;font-size:24px;">&#10003;</div>
+  </div>
+  <style nonce="${opts.nonce}">@keyframes spin { to { transform: rotate(360deg); } }</style>
+  <script nonce="${opts.nonce}">
+    var connectionId = ${connectionIdJson};
+    var TERMINAL = ["completed", "completed_with_errors", "failed", "cancelled"];
+    var MAX_WAIT_MS = 90000; // safety net for a very large tenant — don't spin forever
+    var startedAt = Date.now();
+
+    function finish() {
+      document.getElementById("spinner").style.display = "none";
+      document.getElementById("done").style.display = "flex";
+      document.getElementById("msg").textContent = "Your ${label} account has been connected!";
+      window.opener && window.opener.postMessage(${payloadJson}, "*");
+      setTimeout(function () { window.close(); }, 900);
+    }
+
+    function poll() {
+      if (Date.now() - startedAt > MAX_WAIT_MS) { finish(); return; }
+      fetch("/api/clouds/" + connectionId + "/status", { credentials: "include" })
+        .then(function (r) { return r.json(); })
+        .then(function (data) {
+          var jobDone = !data.job || TERMINAL.indexOf(data.job.status) !== -1;
+          var connDone = data.connectionStatus === "needs_reauth" || data.connectionStatus === "error";
+          if (jobDone || connDone) { finish(); } else { setTimeout(poll, 1500); }
+        })
+        .catch(function () { setTimeout(poll, 1500); });
+    }
+
+    poll();
+  </script>
+</body></html>`;
+}
+
 m365ConnectCallbackRouter.get(
   "/",
   asyncHandler(async (req, res) => {
@@ -423,10 +515,10 @@ m365ConnectCallbackRouter.get(
       await enqueueCloudSyncJob({ syncJobId: jobInsert.rows[0]!.id });
 
       res.type("html").send(
-        popupResultPage({
-          payload: { type: "m365-connect-complete", status: "success", connectionId, cloudType: claims.cloudType },
-          ok: true,
+        popupProgressPage({
+          connectionId,
           cloudType: claims.cloudType,
+          payload: { type: "m365-connect-complete", status: "success", connectionId, cloudType: claims.cloudType },
           nonce: res.locals.cspNonce,
         })
       );
