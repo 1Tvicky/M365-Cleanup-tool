@@ -15,6 +15,15 @@ const CLOUD_LABELS: Record<Workload, string> = {
   teams: "Microsoft Teams",
 };
 
+// SharePoint enumerates sites, not people — a tenant with a hundred users can easily have a
+// thousand+ sites (one per team/group, communication sites, hub sites, etc.), so labeling that
+// count "Users" the same way OneDrive/Teams do is misleading, not just cosmetically wrong.
+const UNIT_LABELS: Record<Workload, { singular: string; plural: string }> = {
+  onedrive: { singular: "User", plural: "Users" },
+  teams: { singular: "User", plural: "Users" },
+  sharepoint: { singular: "Site", plural: "Sites" },
+};
+
 const STATUS_BADGE: Partial<Record<ManageCloudsRow["status"], { label: string; style: string }>> = {
   connecting: { label: "Connecting…", style: "bg-blue-50 text-blue-700" },
   error: { label: "Error", style: "bg-rose-50 text-rose-700" },
@@ -83,6 +92,7 @@ function ManageCloudsRowView({
   const Icon = ICONS[row.cloudType];
   const badge = STATUS_BADGE[row.status];
   const hasJob = row.totalUsers > 0;
+  const unit = UNIT_LABELS[row.cloudType];
 
   return (
     <div>
@@ -99,7 +109,7 @@ function ManageCloudsRowView({
         {hasJob && (
           <div className="min-w-[200px] flex-1">
             <div className="mb-1 text-sm text-slate-600">
-              {row.addedUsers.toLocaleString()} out of {row.totalUsers.toLocaleString()} Users{" "}
+              {row.addedUsers.toLocaleString()} out of {row.totalUsers.toLocaleString()} {unit.plural}{" "}
               <span className="ml-1 font-semibold text-slate-800">{row.percent}%</span>
             </div>
             <div className="flex h-1.5 w-full max-w-[240px] overflow-hidden rounded-full bg-slate-100">
@@ -148,6 +158,7 @@ function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
   const [showFailed, setShowFailed] = useState(false);
   const [failedUsers, setFailedUsers] = useState<ConnectionUserRow[] | null>(null);
   const [loadingFailed, setLoadingFailed] = useState(false);
+  const unit = UNIT_LABELS[row.cloudType];
 
   async function handleShowFailed() {
     setShowFailed(true);
@@ -166,17 +177,17 @@ function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
       <div className="grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-4">
         <Field label="Name" value={row.adminDisplayName ?? row.adminEmail} />
         <Field label="Domain Name" value={row.tenantDomain} />
-        <Field label="Total Users" value={row.totalUsers.toLocaleString()} />
-        <Field label="Added Users" value={row.addedUsers.toLocaleString()} />
+        <Field label={`Total ${unit.plural}`} value={row.totalUsers.toLocaleString()} />
+        <Field label={`Added ${unit.plural}`} value={row.addedUsers.toLocaleString()} />
       </div>
 
       {row.notAddedUsers > 0 && (
         <div className="mt-4 flex items-center gap-4">
           <span className="rounded-md bg-rose-50 px-3 py-1.5 text-sm font-semibold text-rose-600">
-            Users Not Added <span className="ml-1">{row.notAddedUsers.toLocaleString()}</span>
+            {unit.plural} Not Added <span className="ml-1">{row.notAddedUsers.toLocaleString()}</span>
           </span>
           <button onClick={handleShowFailed} className="text-sm font-semibold text-[#1b2fc4] underline underline-offset-2">
-            Failed Users Details
+            Failed {unit.plural} Details
           </button>
         </div>
       )}
@@ -189,7 +200,7 @@ function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
             <table className="w-full text-sm">
               <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                 <tr>
-                  <th className="px-4 py-2 font-medium">User</th>
+                  <th className="px-4 py-2 font-medium">{unit.singular}</th>
                   <th className="px-4 py-2 font-medium">Reason</th>
                 </tr>
               </thead>
