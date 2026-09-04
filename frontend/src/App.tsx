@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { SideNav, type Page } from "./components/layout/SideNav";
 import { LoginPage } from "./pages/LoginPage";
 import { CloudsPage } from "./pages/CloudsPage";
-import { CleanupPage } from "./pages/CleanupPage";
+import { CleaningPage } from "./pages/CleaningPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { logout as apiLogout, me, type OperatorSummary } from "./api/auth";
 
@@ -41,7 +41,7 @@ export default function App() {
       <SideNav active={page} onNavigate={setPage} />
       <main className="flex-1 overflow-y-auto">
         {page === "clouds" && <CloudsPage operator={operator} onLogout={handleLogout} />}
-        {page === "cleanup" && <CleanupPage />}
+        {page === "cleaning" && <CleaningPage />}
         {page === "reports" && <ReportsPage />}
       </main>
     </div>

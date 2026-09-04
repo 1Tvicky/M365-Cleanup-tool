@@ -33,3 +33,18 @@ export async function enqueueCloudSyncJob(payload: CloudSyncJobPayload): Promise
     removeOnFail: false,
   });
 }
+
+/** One job per Cleaning discovery scan (teams/channels/chats structure, or message-count calculation). See jobs/cleaningScanWorker.ts. */
+export const cleaningScanQueue = new Queue("cleaning-scan-jobs", { connection });
+
+export interface CleaningScanJobPayload {
+  scanId: string; // cleaning_scans.id — worker looks up connection + scan_type from Postgres by this id
+}
+
+export async function enqueueCleaningScanJob(payload: CleaningScanJobPayload): Promise<void> {
+  await cleaningScanQueue.add("run-cleaning-scan", payload, {
+    attempts: 1,
+    removeOnComplete: { age: 60 * 60 * 24 * 30 },
+    removeOnFail: false,
+  });
+}

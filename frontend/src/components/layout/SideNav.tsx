@@ -1,8 +1,8 @@
-export type Page = "clouds" | "cleanup" | "reports";
+export type Page = "clouds" | "cleaning" | "reports";
 
 const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
   { id: "clouds", label: "Clouds", icon: "\u{2601}\u{FE0F}" },
-  { id: "cleanup", label: "Cleanup", icon: "\u{1F9F9}" },
+  { id: "cleaning", label: "Cleaning", icon: "\u{1F9F9}" },
   { id: "reports", label: "Reports", icon: "\u{1F4CB}" },
 ];
 

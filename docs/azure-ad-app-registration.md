@@ -62,6 +62,14 @@ authorization gate for the whole tool.
 | `Sites.FullControl.All` | Application, **only if `Sites.ReadWrite.All` proves insufficient** | Some SharePoint admin-level operations (e.g. certain site-collection settings) need full control; request this only if a specific call 403s under `.ReadWrite.All` — don't request it speculatively, it's a materially heavier ask on the consent screen | Manage Clouds (SharePoint), edge cases |
 | `User.Read.All` | Application | Resolve users for the tenant's user/site picker, and to enumerate users for OneDrive/Teams connection sync | Connect, Cleanup |
 | `Reports.Read.All` | Application | Pull storage usage reports to size the preview without walking every drive | Preview |
+| `ChannelMessage.Read.All` | Application | **Added for the Cleaning module discovery phase.** Graph has no channel message-count endpoint — this is required to paginate a channel's messages (and each message's replies) to compute a real count. Not requested until this feature needed it. | Cleaning → Teams channel message counts |
+
+**Action required for existing connections:** `ChannelMessage.Read.All` was added after some tenants
+already granted consent — admin consent only covers the permissions that existed at consent time,
+so any Teams cloud connected *before* this permission was added must be reconnected (Manage Clouds
+→ disconnect → Add Cloud → Microsoft Teams again) before channel message counts work for it. Until
+reconnected, the Cleaning UI reports counts as unavailable rather than failing silently or showing
+a fake number.
 
 **Not requested in v1:** `Chat.ReadWrite.All` / any chat-delete permission. Per your decision to
 defer Teams DM deletion to v2, `Chat.Read.All` is granted for *reporting only* (chat/DM counts and

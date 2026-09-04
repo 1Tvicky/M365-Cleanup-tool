@@ -10,6 +10,7 @@ import { discoveryRouter } from "./routes/discovery.js";
 import { cleanupRouter } from "./routes/cleanup.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { cloudConnectionsRouter, m365ConnectCallbackRouter } from "./routes/cloudConnections.js";
+import { cleaningRouter } from "./routes/cleaning.js";
 import { ApiError } from "./types/index.js";
 
 export const app = express();
@@ -43,6 +44,10 @@ app.use("/api/v1", jobsRouter); // mounts /jobs/* and /tenants/:tenantId/{jobs,r
 // match the Azure AD app registration's redirect URI exactly (docs/azure-ad-app-registration.md §4a).
 app.use("/api/clouds", cloudConnectionsRouter);
 app.use("/api/auth/m365/callback", m365ConnectCallbackRouter);
+
+// Cleaning module (discovery phase) — read-only, reuses connections/tenant_roles from the layer
+// above. Same reasoning for living outside /api/v1: its own contract, its own namespace.
+app.use("/api/cleaning", cleaningRouter);
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ApiError) {

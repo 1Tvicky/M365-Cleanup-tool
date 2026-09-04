@@ -94,5 +94,9 @@ export const config = {
     maxRetries: 5,
     baseBackoffMs: 500,
     maxBackoffMs: 30_000,
+    // Neither the Graph SDK nor Node's fetch has a default timeout — a single hung connection
+    // (observed on a large real tenant's chat enumeration) can otherwise stall an entire batch,
+    // and therefore the whole job, forever. See services/rateLimiter.ts.
+    callTimeoutMs: 30_000,
   },
 } as const;
