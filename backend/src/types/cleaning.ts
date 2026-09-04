@@ -82,6 +82,8 @@ export interface CleanupValidationResult {
   /** Selected items that can never be executed under this app's Graph permissions — reported here, not in errors, since selecting them isn't invalid, just not actionable yet. */
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
+  /** Ids (from the submitted manifest) that resolved successfully, grouped by slot — lets the frontend reconcile a selection against the latest sync (drop ids no longer found) without a separate endpoint. */
+  foundIds: { oneDrive: string[]; sharePoint: string[]; channels: string[]; chats: string[] };
 }
 
 export interface CleanupOperationRow {
@@ -126,4 +128,24 @@ export interface CleanupRecentFile {
   resourceName: string;
   status: "deleted" | "already_gone" | "failed";
   completedAt: string;
+}
+
+/**
+ * "Sync Now" — a thin tenant-level wrapper around the existing sync_jobs (OneDrive/SharePoint)
+ * and cleaning_scans (Teams) mechanisms. Status is never persisted for the operation itself; it's
+ * computed live from whichever of the 1-3 sub-resources were actually triggered.
+ */
+export type CleaningSyncOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed";
+export type CleaningSyncResourceStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+
+export interface CleaningSyncOperation {
+  id: string;
+  status: CleaningSyncOperationStatus;
+  startedAt: string;
+  completedAt: string | null;
+  byResource: {
+    onedrive?: { status: CleaningSyncResourceStatus; error: string | null };
+    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null };
+    teams?: { status: CleaningSyncResourceStatus; error: string | null };
+  };
 }

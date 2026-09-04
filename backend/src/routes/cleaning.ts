@@ -3,7 +3,8 @@ import { z } from "zod";
 import { query, withTransaction } from "../db/pool.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireSession } from "../middleware/auth.js";
-import { enqueueCleaningScanJob, enqueueCleanupExecutionJob } from "../jobs/queue.js";
+import { enqueueCleaningScanJob, enqueueCleanupExecutionJob, enqueueCloudSyncJob } from "../jobs/queue.js";
+import { computeSyncStatus } from "../services/syncStatus.js";
 import { ApiError } from "../types/index.js";
 import type { OperatorRole } from "../types/index.js";
 import type { CloudType } from "../types/connections.js";
@@ -12,6 +13,8 @@ import type {
   CleaningChatRow,
   CleaningResourceRow,
   CleaningScanRow,
+  CleaningSyncOperation,
+  CleaningSyncResourceStatus,
   CleaningTeamsSummary,
   CleanupManifest,
   CleanupOperationItemRow,
@@ -267,21 +270,21 @@ cleaningRouter.get(
       awaiting_count: string; failed_count: string;
     }>(
       `SELECT
-         (SELECT COUNT(DISTINCT team_id) FROM cleaning_channels WHERE connection_id = $1) AS team_count,
-         (SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1) AS channel_count,
-         (SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1) AS chat_count,
+         (SELECT COUNT(DISTINCT team_id) FROM cleaning_channels WHERE connection_id = $1 AND is_active) AS team_count,
+         (SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND is_active) AS channel_count,
+         (SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND is_active) AS chat_count,
          (SELECT COALESCE(SUM(message_count), 0) FROM (
-            SELECT message_count FROM cleaning_channels WHERE connection_id = $1 AND count_status = 'completed'
+            SELECT message_count FROM cleaning_channels WHERE connection_id = $1 AND is_active AND count_status = 'completed'
             UNION ALL
-            SELECT message_count FROM cleaning_chats WHERE connection_id = $1 AND count_status = 'completed'
+            SELECT message_count FROM cleaning_chats WHERE connection_id = $1 AND is_active AND count_status = 'completed'
           ) AS m) AS messages_counted,
          (
-           (SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND count_status IN ('pending','calculating')) +
-           (SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND count_status IN ('pending','calculating'))
+           (SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND is_active AND count_status IN ('pending','calculating')) +
+           (SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND is_active AND count_status IN ('pending','calculating'))
          ) AS awaiting_count,
          (
-           (SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND count_status = 'failed') +
-           (SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND count_status = 'failed')
+           (SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND is_active AND count_status = 'failed') +
+           (SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND is_active AND count_status = 'failed')
          ) AS failed_count`,
       [connectionId]
     );
@@ -316,7 +319,7 @@ cleaningRouter.get(
     const searchClause = `($2::text IS NULL OR team_name ILIKE '%' || $2 || '%' OR channel_name ILIKE '%' || $2 || '%')`;
 
     const countResult = await query<{ count: string }>(
-      `SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND ${searchClause}`,
+      `SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND is_active AND ${searchClause}`,
       [req.params.id, search]
     );
 
@@ -326,7 +329,7 @@ cleaningRouter.get(
     }>(
       `SELECT id, team_id, team_name, channel_id, channel_name, message_count, count_status
        FROM cleaning_channels
-       WHERE connection_id = $1 AND ${searchClause}
+       WHERE connection_id = $1 AND is_active AND ${searchClause}
        ORDER BY team_name, channel_name, id
        LIMIT $3 OFFSET $4`,
       [req.params.id, search, pageSize, (page - 1) * pageSize]
@@ -355,7 +358,7 @@ cleaningRouter.get(
     const searchClause = `($2::text IS NULL OR participants::text ILIKE '%' || $2 || '%')`;
 
     const countResult = await query<{ count: string }>(
-      `SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND ${searchClause}`,
+      `SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND is_active AND ${searchClause}`,
       [req.params.id, search]
     );
 
@@ -365,7 +368,7 @@ cleaningRouter.get(
     }>(
       `SELECT id, chat_type, participants, message_count, count_status, last_message_at
        FROM cleaning_chats
-       WHERE connection_id = $1 AND ${searchClause}
+       WHERE connection_id = $1 AND is_active AND ${searchClause}
        ORDER BY last_message_at DESC NULLS LAST, id
        LIMIT $3 OFFSET $4`,
       [req.params.id, search, pageSize, (page - 1) * pageSize]
@@ -473,9 +476,13 @@ interface Queryable {
  * `Queryable` so it can run against the plain pool (for /validate) or a transaction client (for
  * the real, TOCTOU-safe snapshot inside POST /cleanup) with identical logic.
  */
-async function resolveManifestItems(manifest: CleanupManifest, db: Queryable): Promise<{ items: ResolvedManifestItem[]; errors: string[] }> {
+async function resolveManifestItems(
+  manifest: CleanupManifest,
+  db: Queryable
+): Promise<{ items: ResolvedManifestItem[]; errors: string[]; foundIds: CleanupValidationResult["foundIds"] }> {
   const items: ResolvedManifestItem[] = [];
   const errors: string[] = [];
+  const foundIds: CleanupValidationResult["foundIds"] = { oneDrive: [], sharePoint: [], channels: [], chats: [] };
 
   if (manifest.oneDrive) {
     await resolveConnection(manifest.oneDrive.connectionId, "onedrive");
@@ -498,6 +505,7 @@ async function resolveManifestItems(manifest: CleanupManifest, db: Queryable): P
         graphRef: { userId: row.graph_user_id },
         supported: true,
       });
+      foundIds.oneDrive.push(row.id);
     }
   }
 
@@ -523,13 +531,14 @@ async function resolveManifestItems(manifest: CleanupManifest, db: Queryable): P
         graphRef: { siteId: row.graph_user_id },
         supported: true,
       });
+      foundIds.sharePoint.push(row.id);
     }
   }
 
   if (manifest.channels) {
     await resolveConnection(manifest.channels.connectionId, "teams");
     const result = await db.query<{ id: string; team_id: string; team_name: string; channel_id: string; channel_name: string }>(
-      `SELECT id, team_id, team_name, channel_id, channel_name FROM cleaning_channels WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      `SELECT id, team_id, team_name, channel_id, channel_name FROM cleaning_channels WHERE connection_id = $1 AND is_active AND id = ANY($2::uuid[])`,
       [manifest.channels.connectionId, manifest.channels.ids]
     );
     const found = new Map(result.rows.map((r) => [r.id, r]));
@@ -548,13 +557,14 @@ async function resolveManifestItems(manifest: CleanupManifest, db: Queryable): P
         // Microsoft Graph has no application-permission (unattended) way to delete channel messages — delegated/signed-in-user only.
         supported: false,
       });
+      foundIds.channels.push(row.id);
     }
   }
 
   if (manifest.chats) {
     await resolveConnection(manifest.chats.connectionId, "teams");
     const result = await db.query<{ id: string; chat_id: string; participants: { displayName: string | null; upn: string | null }[] }>(
-      `SELECT id, chat_id, participants FROM cleaning_chats WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      `SELECT id, chat_id, participants FROM cleaning_chats WHERE connection_id = $1 AND is_active AND id = ANY($2::uuid[])`,
       [manifest.chats.connectionId, manifest.chats.ids]
     );
     const found = new Map(result.rows.map((r) => [r.id, r]));
@@ -574,10 +584,11 @@ async function resolveManifestItems(manifest: CleanupManifest, db: Queryable): P
         // Same Graph limitation as channel messages — no application-permission delete path exists.
         supported: false,
       });
+      foundIds.chats.push(row.id);
     }
   }
 
-  return { items, errors };
+  return { items, errors, foundIds };
 }
 
 function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult["summary"] {
@@ -595,17 +606,53 @@ cleaningRouter.post(
   asyncHandler(async (req, res) => {
     const manifest = cleanupManifestSchema.parse(req.body);
     await resolveManifestTenant(manifest, req.session!.operatorId); // authorizes every referenced connection; tenant itself isn't needed for a read-only validation
-    const { items, errors } = await resolveManifestItems(manifest, { query });
+    const { items, errors, foundIds } = await resolveManifestItems(manifest, { query });
 
     const result: CleanupValidationResult = {
       valid: errors.length === 0,
       summary: summarizeItems(items),
       unsupported: items.filter((i) => !i.supported).map((i) => ({ resourceType: i.resourceType, displayName: i.displayName })),
       errors,
+      foundIds,
     };
     res.json(result);
   })
 );
+
+/**
+ * Tenant-scoped concurrency checks shared by both /cleanup and /sync. Every existing "already
+ * running" check in this codebase before this was a plain SELECT-then-INSERT race (confirmed: no
+ * advisory locks or FOR UPDATE anywhere) — callers MUST run these only after taking
+ * `pg_advisory_xact_lock(hashtext(tenantId))` on the same `db` (i.e. the same transaction client),
+ * so the check-then-insert this guards actually is atomic.
+ */
+async function hasActiveTenantCleanup(db: Queryable, tenantId: string): Promise<boolean> {
+  const cleanupOps = await db.query(`SELECT 1 FROM cleanup_operations WHERE tenant_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [
+    tenantId,
+  ]);
+  if (cleanupOps.rows.length > 0) return true;
+  // The legacy tenant-scoped Cleanup pipeline (routes/cleanup.ts) is a separate system against the
+  // same tenant — without this check it could run concurrently and race overlapping Graph deletes.
+  const legacyJobs = await db.query(
+    `SELECT 1 FROM cleanup_jobs WHERE tenant_id = $1 AND status IN ('export_in_progress', 'queued', 'running') LIMIT 1`,
+    [tenantId]
+  );
+  return legacyJobs.rows.length > 0;
+}
+
+async function hasActiveTenantSync(db: Queryable, tenantId: string): Promise<boolean> {
+  const result = await db.query(
+    `SELECT 1 FROM cleaning_sync_operations so
+     LEFT JOIN sync_jobs sj1 ON sj1.id = so.onedrive_sync_job_id
+     LEFT JOIN sync_jobs sj2 ON sj2.id = so.sharepoint_sync_job_id
+     LEFT JOIN cleaning_scans cs ON cs.id = so.teams_scan_id
+     WHERE so.tenant_id = $1
+       AND (sj1.status IN ('queued', 'running') OR sj2.status IN ('queued', 'running') OR cs.status IN ('queued', 'running'))
+     LIMIT 1`,
+    [tenantId]
+  );
+  return result.rows.length > 0;
+}
 
 /** POST /api/cleaning/cleanup — validates + snapshots + enqueues. Requires cleanup_admin. */
 cleaningRouter.post(
@@ -616,43 +663,36 @@ cleaningRouter.post(
     const tenantId = await resolveManifestTenant(manifest, operatorId);
     await requireCleanupAdmin(tenantId, operatorId);
 
-    const { items, errors } = await resolveManifestItems(manifest, { query });
-    if (errors.length > 0) {
-      throw new ApiError(400, "VALIDATION_FAILED", "Your selection has changed and needs to be reviewed again", { errors });
-    }
+    const { operationId, connectionIds } = await withTransaction(async (client) => {
+      const db: Queryable = { query: client.query.bind(client) };
 
-    const connectionIds = [...new Set(items.map((i) => i.connectionId))];
+      // Atomic per-tenant mutex, held for the rest of this transaction — a concurrent sync/cleanup
+      // request for the same tenant blocks here instead of racing the checks below.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [tenantId]);
 
-    const runningCleanup = await query(`SELECT 1 FROM cleanup_operations WHERE tenant_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [
-      tenantId,
-    ]);
-    if (runningCleanup.rows.length > 0) {
-      throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
-    }
-    // The legacy tenant-scoped Cleanup pipeline (routes/cleanup.ts) is a separate system against the
-    // same tenant — without this check the two could run concurrent, overlapping Graph deletes.
-    const runningLegacyCleanup = await query(
-      `SELECT 1 FROM cleanup_jobs WHERE tenant_id = $1 AND status IN ('export_in_progress', 'queued', 'running') LIMIT 1`,
-      [tenantId]
-    );
-    if (runningLegacyCleanup.rows.length > 0) {
-      throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
-    }
-    if (connectionIds.length > 0) {
-      const runningScan = await query(`SELECT 1 FROM cleaning_scans WHERE connection_id = ANY($1::uuid[]) AND status IN ('queued', 'running') LIMIT 1`, [
-        connectionIds,
-      ]);
-      if (runningScan.rows.length > 0) {
-        throw new ApiError(409, "SCAN_IN_PROGRESS", "Discovery is still running for this connection — try again once it finishes");
+      if (await hasActiveTenantCleanup(db, tenantId)) {
+        throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
       }
-    }
+      if (await hasActiveTenantSync(db, tenantId)) {
+        throw new ApiError(409, "SYNC_IN_PROGRESS", "A sync is currently running for this connection — try again once it finishes");
+      }
 
-    const operationId = await withTransaction(async (client) => {
-      // Re-resolve for real here — never trust the pre-check above for what actually gets written,
-      // closing the window between validation and commit.
-      const { items: freshItems, errors: freshErrors } = await resolveManifestItems(manifest, { query: client.query.bind(client) });
+      // Re-resolve for real here — never trust any earlier client-side validation for what
+      // actually gets written, closing the window between validation and commit.
+      const { items: freshItems, errors: freshErrors } = await resolveManifestItems(manifest, db);
       if (freshErrors.length > 0) {
         throw new ApiError(400, "VALIDATION_FAILED", "Your selection has changed and needs to be reviewed again", { errors: freshErrors });
+      }
+
+      const touchedConnectionIds = [...new Set(freshItems.map((i) => i.connectionId))];
+      if (touchedConnectionIds.length > 0) {
+        const runningScan = await client.query(
+          `SELECT 1 FROM cleaning_scans WHERE connection_id = ANY($1::uuid[]) AND status IN ('queued', 'running') LIMIT 1`,
+          [touchedConnectionIds]
+        );
+        if (runningScan.rows.length > 0) {
+          throw new ApiError(409, "SCAN_IN_PROGRESS", "Discovery is still running for this connection — try again once it finishes");
+        }
       }
 
       const unsupportedCount = freshItems.filter((i) => !i.supported).length;
@@ -678,7 +718,7 @@ cleaningRouter.post(
         );
       }
 
-      return newOperationId;
+      return { operationId: newOperationId, connectionIds: touchedConnectionIds };
     });
 
     for (const connectionId of connectionIds) {
@@ -971,5 +1011,188 @@ cleaningRouter.post(
 
     await enqueueCleanupExecutionJob({ operationId: newOperationId });
     res.status(202).json({ operationId: newOperationId, status: "queued" });
+  })
+);
+
+/**
+ * "Sync Now" — a thin tenant-level wrapper around the EXISTING sync_jobs (OneDrive/SharePoint,
+ * cloudSyncWorker.ts) and cleaning_scans (Teams, cleaningScanWorker.ts) mechanisms. No new Graph
+ * code and no new worker: this only decides which of those to (re)start for a tenant's connections
+ * and remembers the resulting ids so the frontend can poll one thing instead of up to three.
+ * Not connection-scoped in the URL for the same reason /cleanup isn't — one sync spans a tenant's
+ * up-to-3 connections. The tenant is never accepted from the client, only derived from and
+ * cross-checked against every connectionId requested (same pattern as resolveManifestTenant).
+ */
+
+const syncRequestSchema = z.object({ connectionIds: z.array(z.string().uuid()).min(1) });
+
+/** POST /api/cleaning/sync — kicks off a refresh of the given connections' discovery data. Viewer-level: sync is read/discovery only, not destructive. */
+cleaningRouter.post(
+  "/sync",
+  asyncHandler(async (req, res) => {
+    const { connectionIds } = syncRequestSchema.parse(req.body);
+    const operatorId = req.session!.operatorId;
+
+    const uniqueConnectionIds = [...new Set(connectionIds)];
+    const accessResults = await Promise.all(uniqueConnectionIds.map((id) => requireConnectionAccess(id, operatorId)));
+    const tenantIds = new Set(accessResults.map((r) => r.tenantId));
+    if (tenantIds.size > 1) {
+      throw new ApiError(400, "TENANT_MISMATCH", "Selected connections belong to more than one Microsoft 365 tenant");
+    }
+    const tenantId = accessResults[0]!.tenantId;
+
+    const connectionRows = await query<{ id: string; cloud_type: CloudType; status: string }>(
+      `SELECT id, cloud_type, status FROM connections WHERE id = ANY($1::uuid[])`,
+      [uniqueConnectionIds]
+    );
+
+    const { operationId, onedriveSyncJobId, sharepointSyncJobId, teamsScanId } = await withTransaction(async (client) => {
+      const db: Queryable = { query: client.query.bind(client) };
+
+      // Same atomic per-tenant mutex /cleanup takes — a concurrent sync/cleanup for this tenant
+      // blocks here rather than racing the checks below.
+      await client.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [tenantId]);
+
+      if (await hasActiveTenantCleanup(db, tenantId)) {
+        throw new ApiError(409, "CLEANUP_IN_PROGRESS", "A cleanup is in progress for this connection — try again once it finishes");
+      }
+      if (await hasActiveTenantSync(db, tenantId)) {
+        throw new ApiError(409, "SYNC_ALREADY_RUNNING", "A sync is already in progress for this connection");
+      }
+
+      let newOnedriveSyncJobId: string | null = null;
+      let newSharepointSyncJobId: string | null = null;
+      let newTeamsScanId: string | null = null;
+
+      for (const conn of connectionRows.rows) {
+        if (conn.status === "disconnected") continue;
+        if (conn.cloud_type === "onedrive" || conn.cloud_type === "sharepoint") {
+          // Exact same insert cloudConnections.ts's POST /:id/resync already does — cloudSyncWorker.ts is untouched.
+          const jobInsert = await client.query<{ id: string }>(`INSERT INTO sync_jobs (connection_id, status) VALUES ($1, 'queued') RETURNING id`, [
+            conn.id,
+          ]);
+          if (conn.cloud_type === "onedrive") newOnedriveSyncJobId = jobInsert.rows[0]!.id;
+          else newSharepointSyncJobId = jobInsert.rows[0]!.id;
+        } else if (conn.cloud_type === "teams") {
+          // Same insert startScan() does — decoupled from it here only because startScan() also
+          // enqueues immediately, and this needs the id first to record on cleaning_sync_operations
+          // before enqueuing after commit (same ordering POST /cleanup already uses).
+          const scanInsert = await client.query<{ id: string }>(
+            `INSERT INTO cleaning_scans (connection_id, scan_type) VALUES ($1, 'teams_structure') RETURNING id`,
+            [conn.id]
+          );
+          newTeamsScanId = scanInsert.rows[0]!.id;
+        }
+      }
+
+      if (!newOnedriveSyncJobId && !newSharepointSyncJobId && !newTeamsScanId) {
+        throw new ApiError(400, "NOTHING_TO_SYNC", "None of the selected connections can be synced right now");
+      }
+
+      const opInsert = await client.query<{ id: string }>(
+        `INSERT INTO cleaning_sync_operations (tenant_id, requested_by, onedrive_sync_job_id, sharepoint_sync_job_id, teams_scan_id)
+         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [tenantId, operatorId, newOnedriveSyncJobId, newSharepointSyncJobId, newTeamsScanId]
+      );
+
+      return {
+        operationId: opInsert.rows[0]!.id,
+        onedriveSyncJobId: newOnedriveSyncJobId,
+        sharepointSyncJobId: newSharepointSyncJobId,
+        teamsScanId: newTeamsScanId,
+      };
+    });
+
+    for (const conn of connectionRows.rows) {
+      if (conn.status === "disconnected") continue;
+      await query(
+        `INSERT INTO connection_events (connection_id, tenant_id, event, operator_id, detail) VALUES ($1, $2, 'cleaning_sync_requested', $3, $4)`,
+        [conn.id, tenantId, operatorId, { operationId }]
+      );
+    }
+
+    if (onedriveSyncJobId) await enqueueCloudSyncJob({ syncJobId: onedriveSyncJobId });
+    if (sharepointSyncJobId) await enqueueCloudSyncJob({ syncJobId: sharepointSyncJobId });
+    if (teamsScanId) await enqueueCleaningScanJob({ scanId: teamsScanId });
+
+    res.status(202).json({ operationId, status: "queued" });
+  })
+);
+
+/** Same 404-not-403 existence-hiding convention as requireConnectionAccess/requireCleanupOperationAccess. */
+async function requireSyncOperationAccess(operationId: string, operatorId: string): Promise<{ tenantId: string }> {
+  const result = await query<{ tenant_id: string }>(`SELECT tenant_id FROM cleaning_sync_operations WHERE id = $1`, [operationId]);
+  const row = result.rows[0];
+  if (!row) throw new ApiError(404, "SYNC_OPERATION_NOT_FOUND", "No such sync operation");
+
+  const access = await query<{ role: OperatorRole }>(`SELECT role FROM tenant_roles WHERE tenant_id = $1 AND operator_id = $2`, [
+    row.tenant_id,
+    operatorId,
+  ]);
+  if (!access.rows[0]) throw new ApiError(404, "SYNC_OPERATION_NOT_FOUND", "No such sync operation");
+  return { tenantId: row.tenant_id };
+}
+
+async function fetchSubResourceStatus(
+  table: "sync_jobs" | "cleaning_scans",
+  id: string
+): Promise<{ status: string; finishedAt: string | null; error: string | null }> {
+  const result = await query<{ status: string; finished_at: string | null; error_log: { message: string }[] }>(
+    `SELECT status, finished_at, error_log FROM ${table} WHERE id = $1`,
+    [id]
+  );
+  const row = result.rows[0]!;
+  const errorLog = Array.isArray(row.error_log) ? row.error_log : [];
+  return { status: row.status, finishedAt: row.finished_at, error: errorLog.length > 0 ? errorLog[errorLog.length - 1]!.message : null };
+}
+
+/** GET /api/cleaning/sync/operations/:operationId — unified status, computed live from whichever sub-resources this operation actually touched. */
+cleaningRouter.get(
+  "/sync/operations/:operationId",
+  asyncHandler(async (req, res) => {
+    await requireSyncOperationAccess(req.params.operationId!, req.session!.operatorId);
+
+    const opResult = await query<{
+      id: string; started_at: string; onedrive_sync_job_id: string | null; sharepoint_sync_job_id: string | null; teams_scan_id: string | null;
+    }>(
+      `SELECT id, started_at, onedrive_sync_job_id, sharepoint_sync_job_id, teams_scan_id FROM cleaning_sync_operations WHERE id = $1`,
+      [req.params.operationId]
+    );
+    const op = opResult.rows[0]!;
+
+    const byResource: CleaningSyncOperation["byResource"] = {};
+    const subStatuses: string[] = [];
+    let completedAt: string | null = null;
+    const noteCompletion = (finishedAt: string | null) => {
+      if (finishedAt) completedAt = !completedAt || finishedAt > completedAt ? finishedAt : completedAt;
+    };
+
+    if (op.onedrive_sync_job_id) {
+      const r = await fetchSubResourceStatus("sync_jobs", op.onedrive_sync_job_id);
+      byResource.onedrive = { status: r.status as CleaningSyncResourceStatus, error: r.error };
+      subStatuses.push(r.status);
+      noteCompletion(r.finishedAt);
+    }
+    if (op.sharepoint_sync_job_id) {
+      const r = await fetchSubResourceStatus("sync_jobs", op.sharepoint_sync_job_id);
+      byResource.sharepoint = { status: r.status as CleaningSyncResourceStatus, error: r.error };
+      subStatuses.push(r.status);
+      noteCompletion(r.finishedAt);
+    }
+    if (op.teams_scan_id) {
+      const r = await fetchSubResourceStatus("cleaning_scans", op.teams_scan_id);
+      byResource.teams = { status: r.status as CleaningSyncResourceStatus, error: r.error };
+      subStatuses.push(r.status);
+      noteCompletion(r.finishedAt);
+    }
+
+    const result: CleaningSyncOperation = {
+      id: op.id,
+      status: computeSyncStatus(subStatuses),
+      startedAt: op.started_at,
+      completedAt,
+      byResource,
+    };
+    res.json(result);
   })
 );

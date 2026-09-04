@@ -70,7 +70,8 @@ async function runStructureScan(
           await query(
             `INSERT INTO cleaning_channels (connection_id, team_id, team_name, channel_id, channel_name)
              VALUES ($1, $2, $3, $4, $5)
-             ON CONFLICT (connection_id, channel_id) DO UPDATE SET team_name = EXCLUDED.team_name, channel_name = EXCLUDED.channel_name`,
+             ON CONFLICT (connection_id, channel_id) DO UPDATE SET
+               team_name = EXCLUDED.team_name, channel_name = EXCLUDED.channel_name, is_active = true`,
             [connectionId, team.id, team.displayName, channel.id, channel.displayName]
           );
         }
@@ -104,14 +105,19 @@ async function runStructureScan(
       `INSERT INTO cleaning_chats (connection_id, chat_id, chat_type, participants, last_message_at)
        VALUES ($1, $2, $3, $4, $5)
        ON CONFLICT (connection_id, chat_id) DO UPDATE SET
-         chat_type = EXCLUDED.chat_type, participants = EXCLUDED.participants, last_message_at = EXCLUDED.last_message_at`,
+         chat_type = EXCLUDED.chat_type, participants = EXCLUDED.participants, last_message_at = EXCLUDED.last_message_at, is_active = true`,
       [connectionId, chat.id, chat.chatType, JSON.stringify(chat.participants), chat.lastUpdatedDateTime]
     );
   }
 
-  // Anything no longer present (channel deleted, chat no longer visible to any enumerated user) shouldn't linger.
-  await query(`DELETE FROM cleaning_channels WHERE connection_id = $1 AND NOT (channel_id = ANY($2::text[]))`, [connectionId, channelIds]);
-  await query(`DELETE FROM cleaning_chats WHERE connection_id = $1 AND NOT (chat_id = ANY($2::text[]))`, [connectionId, chatIds]);
+  // Anything no longer present (channel deleted, chat no longer visible to any enumerated user) is
+  // marked inactive rather than deleted — keeps history/audit trail, and reactivates automatically
+  // (is_active = true above) if it reappears on a later sync.
+  await query(`UPDATE cleaning_channels SET is_active = false WHERE connection_id = $1 AND NOT (channel_id = ANY($2::text[]))`, [
+    connectionId,
+    channelIds,
+  ]);
+  await query(`UPDATE cleaning_chats SET is_active = false WHERE connection_id = $1 AND NOT (chat_id = ANY($2::text[]))`, [connectionId, chatIds]);
 
   return failed;
 }
@@ -205,6 +211,13 @@ export const cleaningScanWorker = new Worker(
       const cancelled = await isCancelled(scanId);
       const finalStatus = cancelled ? "cancelled" : failed > 0 ? "completed_with_errors" : "completed";
       await query(`UPDATE cleaning_scans SET status = $2, finished_at = now() WHERE id = $1`, [scanId, finalStatus]);
+      // Mirrors cloudSyncWorker.ts's own success path — today only that worker moves
+      // connections.last_synced_at, so a Teams-only sync wouldn't otherwise move the "Last
+      // updated" timestamp the Cleaning dashboard already shows. Message-count scans don't
+      // represent a discovery refresh in that same sense, so this is scoped to structure only.
+      if (info.scan_type === "teams_structure" && !cancelled) {
+        await query(`UPDATE connections SET last_synced_at = now() WHERE id = $1`, [info.connection_id]);
+      }
       await logConnectionEvent("cleaning_scan_finished", info.connection_id, info.tenant_id, { scanId, status: finalStatus, failed });
     } catch (err) {
       if (isReauthError(err)) {

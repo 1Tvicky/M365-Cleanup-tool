@@ -1,16 +1,21 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   calculateTeamsMessageCounts,
+  getSyncOperation,
   getTeamsSummary,
   listCleaningConnections,
   listOneDriveAccounts,
   listSharePointSites,
   listTeamsChannels,
   listTeamsDMs,
+  startSync,
+  validateCleanup,
   type CleaningChannelRow,
   type CleaningChatRow,
   type CleaningConnectionRow,
   type CleaningResourceRow,
+  type CleaningSyncOperation,
+  type CleaningSyncResourceStatus,
   type CleaningTeamsSummary,
   type CleanupManifest,
   type PageResult,
@@ -36,6 +41,33 @@ interface TenantGroup {
 }
 
 type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "review" | "cleanupConfirm" | "cleanupProgress" | "cleanupResults";
+
+function groupConnectionsByDomain(connections: CleaningConnectionRow[]): TenantGroup[] {
+  const byDomain = new Map<string, TenantGroup>();
+  for (const c of connections) {
+    if (!byDomain.has(c.displayName)) {
+      byDomain.set(c.displayName, {
+        domain: c.displayName,
+        adminEmail: c.adminEmail,
+        adminDisplayName: c.adminDisplayName,
+        status: c.status,
+        lastSyncedAt: c.lastSyncedAt,
+      });
+    }
+    const group = byDomain.get(c.displayName)!;
+    group[c.cloudType] = c;
+    if (c.lastSyncedAt && (!group.lastSyncedAt || c.lastSyncedAt > group.lastSyncedAt)) group.lastSyncedAt = c.lastSyncedAt;
+  }
+  return [...byDomain.values()];
+}
+
+/** Keeps only the entries whose key is in `foundIds` — used to drop selected rows that a sync found no longer exist in Microsoft 365, identified by their stable internal id, never by display name. */
+function pruneToFound<T>(map: Map<string, T>, foundIds: string[]): Map<string, T> {
+  const foundSet = new Set(foundIds);
+  const next = new Map<string, T>();
+  for (const [id, row] of map) if (foundSet.has(id)) next.set(id, row);
+  return next;
+}
 
 /** Only 'oneDrive'/'sharePoint' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
 function buildCleanupManifest(
@@ -92,29 +124,51 @@ export function CleaningPage() {
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
+  const [reconciliationBanner, setReconciliationBanner] = useState<string | null>(null);
 
   useEffect(() => {
     listCleaningConnections()
-      .then(({ connections }) => {
-        const byDomain = new Map<string, TenantGroup>();
-        for (const c of connections) {
-          if (!byDomain.has(c.displayName)) {
-            byDomain.set(c.displayName, {
-              domain: c.displayName,
-              adminEmail: c.adminEmail,
-              adminDisplayName: c.adminDisplayName,
-              status: c.status,
-              lastSyncedAt: c.lastSyncedAt,
-            });
-          }
-          const group = byDomain.get(c.displayName)!;
-          group[c.cloudType] = c;
-          if (c.lastSyncedAt && (!group.lastSyncedAt || c.lastSyncedAt > group.lastSyncedAt)) group.lastSyncedAt = c.lastSyncedAt;
-        }
-        setGroups([...byDomain.values()]);
-      })
+      .then(({ connections }) => setGroups(groupConnectionsByDomain(connections)))
       .finally(() => setLoadingGroups(false));
   }, []);
+
+  /**
+   * Runs after a sync completes: refreshes lastSyncedAt for the Dashboard/Landing display, then —
+   * if there's a current selection — re-validates it and drops any selected id the sync no longer
+   * found (identified by its stable id, never display name), surfacing a banner if anything changed.
+   * Best-effort: if the reconciliation check itself fails, the selection is left as-is — the
+   * existing validate-on-Continue-to-Cleanup check downstream would still catch anything stale.
+   */
+  async function handleSyncFinished() {
+    listCleaningConnections().then(({ connections }) => {
+      const nextGroups = groupConnectionsByDomain(connections);
+      setGroups(nextGroups);
+      setActiveGroup((current) => (current ? (nextGroups.find((g) => g.domain === current.domain) ?? current) : current));
+    });
+
+    if (!activeGroup || !hasSelection(totals)) return;
+    const manifest = buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedChannels, selectedChats);
+    try {
+      const { foundIds } = await validateCleanup(manifest);
+      const removedCount =
+        selectedOneDrive.size -
+        foundIds.oneDrive.length +
+        (selectedSharePoint.size - foundIds.sharePoint.length) +
+        (selectedChannels.size - foundIds.channels.length) +
+        (selectedChats.size - foundIds.chats.length);
+      if (removedCount > 0) {
+        setSelectedOneDrive((prev) => pruneToFound(prev, foundIds.oneDrive));
+        setSelectedSharePoint((prev) => pruneToFound(prev, foundIds.sharePoint));
+        setSelectedChannels((prev) => pruneToFound(prev, foundIds.channels));
+        setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
+        setReconciliationBanner(
+          `${removedCount.toLocaleString()} selected item${removedCount === 1 ? " is" : "s are"} no longer available in Microsoft 365 — your selection has been updated.`
+        );
+      }
+    } catch {
+      // Best-effort reconciliation — see comment above.
+    }
+  }
 
   const totals: SelectionTotals = useMemo(
     () => ({
@@ -205,12 +259,23 @@ export function CleaningPage() {
         )}
 
         {view === "dashboard" && activeGroup && (
-          <Dashboard
-            group={activeGroup}
-            onOpenOneDrive={() => setView("onedrive")}
-            onOpenSharePoint={() => setView("sharepoint")}
-            onOpenTeams={() => setView("teams")}
-          />
+          <>
+            {reconciliationBanner && (
+              <div className="mb-4 flex items-start justify-between gap-3 rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800">
+                <span>{reconciliationBanner}</span>
+                <button onClick={() => setReconciliationBanner(null)} className="shrink-0 font-medium text-amber-700 hover:text-amber-900">
+                  Dismiss
+                </button>
+              </div>
+            )}
+            <Dashboard
+              group={activeGroup}
+              onOpenOneDrive={() => setView("onedrive")}
+              onOpenSharePoint={() => setView("sharepoint")}
+              onOpenTeams={() => setView("teams")}
+              onSyncFinished={handleSyncFinished}
+            />
+          </>
         )}
 
         {view === "onedrive" && activeGroup?.onedrive && (
@@ -298,12 +363,35 @@ function ServiceCard({ icon, name, stats, action, onClick, disabled }: { icon: s
   );
 }
 
-function Dashboard({ group, onOpenOneDrive, onOpenSharePoint, onOpenTeams }: { group: TenantGroup; onOpenOneDrive: () => void; onOpenSharePoint: () => void; onOpenTeams: () => void }) {
+/** ✓ / ⏳ / ✗ for one resource's sync sub-status — used only while the "Sync Now" progress row is visible. */
+function syncResourceIcon(status: CleaningSyncResourceStatus | undefined): string {
+  if (!status) return "";
+  if (status === "queued" || status === "running") return "⏳";
+  if (status === "completed") return "✓";
+  return "✗";
+}
+
+function Dashboard({
+  group,
+  onOpenOneDrive,
+  onOpenSharePoint,
+  onOpenTeams,
+  onSyncFinished,
+}: {
+  group: TenantGroup;
+  onOpenOneDrive: () => void;
+  onOpenSharePoint: () => void;
+  onOpenTeams: () => void;
+  onSyncFinished: () => void;
+}) {
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [sharePointTotals, setSharePointTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
+  const [syncOperationId, setSyncOperationId] = useState<string | null>(null);
+  const [syncOperation, setSyncOperation] = useState<CleaningSyncOperation | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
 
-  useEffect(() => {
+  const refreshTotals = useCallback(() => {
     if (group.onedrive) {
       listOneDriveAccounts(group.onedrive.id, { sort: "storage", pageSize: 200 }).then(({ accounts, total }) => {
         // `total` is the accurate count; the byte sum is over the (large) page fetched here, which
@@ -318,6 +406,49 @@ function Dashboard({ group, onOpenOneDrive, onOpenSharePoint, onOpenTeams }: { g
       });
     }
   }, [group]);
+
+  useEffect(refreshTotals, [refreshTotals]);
+
+  async function handleSync() {
+    setSyncError(null);
+    setSyncOperation(null);
+    const connectionIds = [group.onedrive?.id, group.sharepoint?.id, group.teams?.id].filter((id): id is string => Boolean(id));
+    try {
+      const { operationId } = await startSync(connectionIds);
+      setSyncOperationId(operationId);
+    } catch (err) {
+      setSyncError(err instanceof ApiClientError ? err.message : "Couldn't start sync. Try again.");
+    }
+  }
+
+  const isSyncing = syncOperationId != null && (!syncOperation || syncOperation.status === "queued" || syncOperation.status === "running");
+
+  // Polls (same 3s self-rearming pattern as the Teams summary poll below) while the sync is in
+  // flight, then refreshes this dashboard's own totals and tells the parent page to re-check
+  // lastSyncedAt and reconcile the current selection against whatever the sync just found.
+  useEffect(() => {
+    if (!syncOperationId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      const op = await getSyncOperation(syncOperationId!).catch(() => null);
+      if (cancelled || !op) return;
+      setSyncOperation(op);
+      if (op.status === "queued" || op.status === "running") {
+        timer = setTimeout(poll, 3000);
+      } else {
+        refreshTotals();
+        if (group.teams) getTeamsSummary(group.teams.id).then(setTeamsSummary).catch(() => {});
+        onSyncFinished();
+      }
+    }
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncOperationId]);
 
   useEffect(() => {
     if (!group.teams) return;
@@ -340,7 +471,36 @@ function Dashboard({ group, onOpenOneDrive, onOpenSharePoint, onOpenTeams }: { g
 
   return (
     <div>
-      <h2 className="mb-5 text-base font-semibold text-slate-800">{group.domain}</h2>
+      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 className="text-base font-semibold text-slate-800">{group.domain}</h2>
+          <p className="mt-0.5 text-xs text-slate-400">{group.lastSyncedAt ? `Last synced ${formatDate(group.lastSyncedAt)}` : "Not synced yet"}</p>
+        </div>
+        <div className="flex flex-col items-end gap-1">
+          <button
+            onClick={handleSync}
+            disabled={isSyncing}
+            className="rounded-md border border-[#1b2fc4] px-4 py-1.5 text-sm font-semibold text-[#1b2fc4] hover:bg-[#1b2fc4]/5 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {isSyncing ? "Syncing…" : "Sync Now"}
+          </button>
+          {isSyncing && syncOperation && (
+            <div className="flex gap-2 text-xs text-slate-500">
+              {group.onedrive && <span>OneDrive {syncResourceIcon(syncOperation.byResource.onedrive?.status)}</span>}
+              {group.sharepoint && <span>SharePoint {syncResourceIcon(syncOperation.byResource.sharepoint?.status)}</span>}
+              {group.teams && <span>Teams {syncResourceIcon(syncOperation.byResource.teams?.status)}</span>}
+            </div>
+          )}
+          {!isSyncing && syncOperation && syncOperation.status === "completed" && (
+            <p className="text-xs text-emerald-600">✓ Sync completed</p>
+          )}
+          {!isSyncing && syncOperation && syncOperation.status === "completed_with_errors" && (
+            <p className="text-xs text-amber-600">⚠ Sync completed with some errors</p>
+          )}
+          {!isSyncing && syncOperation && syncOperation.status === "failed" && <p className="text-xs text-rose-600">Sync failed</p>}
+          {syncError && <p className="text-xs text-rose-600">{syncError}</p>}
+        </div>
+      </div>
       <div className="flex flex-wrap gap-4">
         <ServiceCard
           icon="☁️"

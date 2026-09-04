@@ -136,6 +136,8 @@ export interface CleanupValidationResult {
   summary: { oneDriveAccounts: number; sharePointSites: number; channels: number; chats: number };
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
+  /** Ids from the submitted manifest that resolved successfully, grouped by slot — used to reconcile a selection after a sync (drop ids no longer found). */
+  foundIds: { oneDrive: string[]; sharePoint: string[]; channels: string[]; chats: string[] };
 }
 
 export interface CleanupOperationRow {
@@ -220,4 +222,32 @@ export function cleanupReportUrl(operationId: string): string {
 
 export function retryCleanup(operationId: string): Promise<{ operationId: string; status: "queued" }> {
   return rawFetch(`/api/cleaning/cleanup/${operationId}/retry`, { method: "POST" });
+}
+
+/**
+ * "Sync Now" — a thin tenant-level wrapper around the existing OneDrive/SharePoint sync and Teams
+ * discovery scan mechanisms. No new discovery logic on the backend; this just lets the Cleaning
+ * page trigger and poll all of a tenant's connections with one id instead of up to three.
+ */
+export type CleaningSyncOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed";
+export type CleaningSyncResourceStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+
+export interface CleaningSyncOperation {
+  id: string;
+  status: CleaningSyncOperationStatus;
+  startedAt: string;
+  completedAt: string | null;
+  byResource: {
+    onedrive?: { status: CleaningSyncResourceStatus; error: string | null };
+    sharepoint?: { status: CleaningSyncResourceStatus; error: string | null };
+    teams?: { status: CleaningSyncResourceStatus; error: string | null };
+  };
+}
+
+export function startSync(connectionIds: string[]): Promise<{ operationId: string; status: "queued" }> {
+  return rawFetch(`/api/cleaning/sync`, { method: "POST", body: JSON.stringify({ connectionIds }) });
+}
+
+export function getSyncOperation(operationId: string): Promise<CleaningSyncOperation> {
+  return rawFetch(`/api/cleaning/sync/operations/${operationId}`);
 }
