@@ -123,6 +123,28 @@ export function CleanupResultsView({ operationId, onDone, onRetried }: { operati
         </a>
       </div>
 
+      {summary && (
+        <div className="mb-4 rounded-xl border border-slate-200 bg-white p-4">
+          <p className="mb-2 text-xs font-semibold uppercase tracking-wide text-slate-400">By resource type</p>
+          <div className="grid grid-cols-1 gap-x-6 gap-y-2 sm:grid-cols-2">
+            {Object.entries(summary.byType)
+              .filter(([, v]) => v.total > 0)
+              .map(([type, v]) => (
+                <div key={type} className="flex items-center justify-between text-sm">
+                  <span className="text-slate-600">{RESOURCE_LABEL[type as CleanupResourceType]}</span>
+                  <span className="flex gap-3 text-xs">
+                    <span className="text-slate-500">Total {v.total.toLocaleString()}</span>
+                    <span className="text-emerald-600">Success {v.completed.toLocaleString()}</span>
+                    <span className="text-rose-600">Failed {v.failed.toLocaleString()}</span>
+                    {v.skipped > 0 && <span className="text-slate-500">Skipped {v.skipped.toLocaleString()}</span>}
+                    {v.unsupported > 0 && <span className="text-amber-600">Not supported {v.unsupported.toLocaleString()}</span>}
+                  </span>
+                </div>
+              ))}
+          </div>
+        </div>
+      )}
+
       <div className="mb-4 flex gap-1 rounded-lg bg-slate-100 p-1">
         {FILTERS.map((f) => (
           <button

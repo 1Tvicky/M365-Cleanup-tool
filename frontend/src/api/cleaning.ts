@@ -154,6 +154,10 @@ export interface CleanupOperationRow {
   cancelRequestedAt: string | null;
   createdAt: string;
   errorMessage: string | null;
+  /** null defensively (LEFT JOIN) — operators are never hard-deleted in this app, so in practice always present. */
+  requestedBy: { email: string; displayName: string } | null;
+  /** A connection's own display_name (e.g. "cloudfuze.co") touched by this operation — not tenants.display_name, which can legitimately differ from what every other screen shows. */
+  label: string;
 }
 
 export interface CleanupOperationItemRow {
@@ -194,6 +198,17 @@ export function startCleanup(manifest: CleanupManifest): Promise<{ operationId: 
 
 export function getCleanupProgress(operationId: string): Promise<CleanupProgress> {
   return rawFetch(`/api/cleaning/cleanup/${operationId}`);
+}
+
+/** Paginated list of this operator's tenant's cleanup operations, newest first — powers the Reports page. */
+export function listCleanupOperations(
+  opts: { status?: CleanupOperationStatus; page?: number; pageSize?: number } = {}
+): Promise<{ operations: CleanupOperationRow[] } & PageResult<CleanupOperationRow>> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  params.set("page", String(opts.page ?? 1));
+  params.set("pageSize", String(opts.pageSize ?? 20));
+  return rawFetch(`/api/cleaning/cleanup/operations?${params.toString()}`);
 }
 
 export function getCleanupOperationItems(

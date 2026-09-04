@@ -100,6 +100,10 @@ export interface CleanupOperationRow {
   cancelRequestedAt: string | null;
   createdAt: string;
   errorMessage: string | null;
+  /** null defensively (LEFT JOIN) — operators are never hard-deleted in this app, so in practice always present. */
+  requestedBy: { email: string; displayName: string } | null;
+  /** A connection's own display_name (e.g. "cloudfuze.co") touched by this operation — deliberately not tenants.display_name, which can legitimately differ from what every other screen shows the user. */
+  label: string;
 }
 
 export interface CleanupOperationItemRow {

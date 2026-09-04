@@ -768,7 +768,7 @@ async function requireCleanupOperationAccess(operationId: string, operatorId: st
   return { tenantId: row.tenant_id };
 }
 
-function toCleanupOperationRow(r: {
+interface CleanupOperationSqlRow {
   id: string;
   status: string;
   total_items: number;
@@ -782,7 +782,22 @@ function toCleanupOperationRow(r: {
   cancel_requested_at: string | null;
   created_at: string;
   error_message: string | null;
-}): CleanupOperationRow {
+  requested_by_email: string | null;
+  requested_by_display_name: string | null;
+  label: string | null;
+}
+
+/** Shared by the single-operation getter and the list endpoint — same columns, same joins (operators for "Requested by", one of the operation's own touched connections for a human label). */
+const CLEANUP_OPERATION_SELECT = `
+  co.id, co.status, co.total_items, co.processed_items, co.successful_items, co.failed_items, co.skipped_items,
+  co.retry_of_operation_id, co.started_at, co.completed_at, co.cancel_requested_at, co.created_at, co.error_message,
+  o.email AS requested_by_email, o.display_name AS requested_by_display_name,
+  (SELECT c.display_name FROM cleanup_operation_items coi
+   JOIN connections c ON c.id = coi.connection_id
+   WHERE coi.cleanup_operation_id = co.id LIMIT 1) AS label
+`;
+
+function toCleanupOperationRow(r: CleanupOperationSqlRow): CleanupOperationRow {
   return {
     id: r.id,
     status: r.status as CleanupOperationStatus,
@@ -797,6 +812,8 @@ function toCleanupOperationRow(r: {
     cancelRequestedAt: r.cancel_requested_at,
     createdAt: r.created_at,
     errorMessage: r.error_message,
+    requestedBy: r.requested_by_email ? { email: r.requested_by_email, displayName: r.requested_by_display_name ?? r.requested_by_email } : null,
+    label: r.label ?? "Microsoft 365",
   };
 }
 
@@ -809,17 +826,50 @@ const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   chat: "Direct message",
 };
 
+/** GET /api/cleaning/cleanup/operations — paginated list of this operator's tenant's cleanup operations, for the Reports page. Optional ?status= filter. */
+cleaningRouter.get(
+  "/cleanup/operations",
+  asyncHandler(async (req, res) => {
+    const { page, pageSize } = parsePageQuery(req);
+    const statusFilter = typeof req.query.status === "string" ? req.query.status : null;
+    const statusClause = `($2::text IS NULL OR co.status = $2)`;
+
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*) FROM cleanup_operations co
+       JOIN tenant_roles tr ON tr.tenant_id = co.tenant_id AND tr.operator_id = $1
+       WHERE ${statusClause}`,
+      [req.session!.operatorId, statusFilter]
+    );
+    const result = await query<CleanupOperationSqlRow>(
+      `SELECT ${CLEANUP_OPERATION_SELECT}
+       FROM cleanup_operations co
+       JOIN tenant_roles tr ON tr.tenant_id = co.tenant_id AND tr.operator_id = $1
+       LEFT JOIN operators o ON o.id = co.requested_by
+       WHERE ${statusClause}
+       ORDER BY co.created_at DESC
+       LIMIT $3 OFFSET $4`,
+      [req.session!.operatorId, statusFilter, pageSize, (page - 1) * pageSize]
+    );
+
+    res.json({
+      operations: result.rows.map(toCleanupOperationRow),
+      total: Number(countResult.rows[0]!.count),
+      page,
+      pageSize,
+    });
+  })
+);
+
 /** GET /api/cleaning/cleanup/:operationId — progress, for the Cleanup Progress screen's polling. */
 cleaningRouter.get(
   "/cleanup/:operationId",
   asyncHandler(async (req, res) => {
     await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
 
-    const opResult = await query<{
-      id: string; status: string; total_items: number; processed_items: number; successful_items: number;
-      failed_items: number; skipped_items: number; retry_of_operation_id: string | null;
-      started_at: string | null; completed_at: string | null; cancel_requested_at: string | null; created_at: string; error_message: string | null;
-    }>(`SELECT * FROM cleanup_operations WHERE id = $1`, [req.params.operationId]);
+    const opResult = await query<CleanupOperationSqlRow>(
+      `SELECT ${CLEANUP_OPERATION_SELECT} FROM cleanup_operations co LEFT JOIN operators o ON o.id = co.requested_by WHERE co.id = $1`,
+      [req.params.operationId]
+    );
     const op = opResult.rows[0];
     if (!op) throw new ApiError(404, "CLEANUP_OPERATION_NOT_FOUND", "No such cleanup operation");
 

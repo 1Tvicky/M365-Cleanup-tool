@@ -40,14 +40,3 @@ export interface Preview {
   rows: PreviewBreakdownRow[];
   warnings: string[];
 }
-
-export interface CleanupJob {
-  jobId: string;
-  tenantName: string;
-  status: JobStatus;
-  progress: { total: number; completed: number; failed: number };
-  startedAt: string | null;
-  finishedAt: string | null;
-  bytesReclaimed: number;
-  confirmedByEmail: string;
-}

@@ -1,4 +1,4 @@
-import type { CleanupJob, CloudConnector, Preview, Tenant } from "../types";
+import type { CloudConnector, Preview, Tenant } from "../types";
 
 // Phase 1 (M365 only) — mirrors CloudFuze's "Business Clouds" tile grid, scoped to the three
 // workloads this tool cleans up. Broader clouds (Google, Box, Slack, etc.) are out of scope here.
@@ -74,36 +74,3 @@ export const MOCK_PREVIEW: Preview = {
     "Estimated batch time is ~14 minutes at current Graph throttling limits for this tenant.",
   ],
 };
-
-export const MOCK_JOBS: CleanupJob[] = [
-  {
-    jobId: "job-9001",
-    tenantName: "Contoso Ltd",
-    status: "completed",
-    progress: { total: 3210, completed: 3210, failed: 0 },
-    startedAt: "2026-09-01T09:00:00Z",
-    finishedAt: "2026-09-01T09:22:00Z",
-    bytesReclaimed: 512_450_000_000,
-    confirmedByEmail: "vignesh.t@cloudfuze.com",
-  },
-  {
-    jobId: "job-9002",
-    tenantName: "Fabrikam Inc",
-    status: "completed_with_errors",
-    progress: { total: 1890, completed: 1864, failed: 26 },
-    startedAt: "2026-08-29T13:00:00Z",
-    finishedAt: "2026-08-29T13:31:00Z",
-    bytesReclaimed: 288_900_000_000,
-    confirmedByEmail: "ops@cloudfuze.com",
-  },
-  {
-    jobId: "job-9003",
-    tenantName: "Contoso Ltd",
-    status: "running",
-    progress: { total: 4821, completed: 1560, failed: 2 },
-    startedAt: "2026-09-03T09:58:00Z",
-    finishedAt: null,
-    bytesReclaimed: 0,
-    confirmedByEmail: "vignesh.t@cloudfuze.com",
-  },
-];

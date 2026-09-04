@@ -113,7 +113,7 @@ const STATUS_LABEL: Record<CleaningConnectionRow["status"], { label: string; sty
   disconnected: { label: "Disconnected", style: "bg-slate-100 text-slate-500" },
 };
 
-export function CleaningPage() {
+export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operationId: string) => void } = {}) {
   const [view, setView] = useState<View>("landing");
   const [groups, setGroups] = useState<TenantGroup[]>([]);
   const [loadingGroups, setLoadingGroups] = useState(true);
@@ -208,8 +208,14 @@ export function CleaningPage() {
         manifest={buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedChannels, selectedChats)}
         onBack={() => setView("review")}
         onStarted={(operationId) => {
-          setCleanupOperationId(operationId);
-          setView("cleanupProgress");
+          if (onCleanupStarted) {
+            onCleanupStarted(operationId);
+          } else {
+            // Fallback for when no redirect handler is provided — normally unreachable once App.tsx
+            // always passes onCleanupStarted, kept so this component still works standalone.
+            setCleanupOperationId(operationId);
+            setView("cleanupProgress");
+          }
         }}
       />
     );
