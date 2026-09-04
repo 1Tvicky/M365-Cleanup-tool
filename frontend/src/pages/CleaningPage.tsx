@@ -43,6 +43,34 @@ interface TenantGroup {
 
 type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "review" | "cleanupConfirm" | "cleanupProgress" | "cleanupResults";
 
+/**
+ * Only these "browsing" views are reflected in the URL (as `?group=<domain>&view=<view>` on the same
+ * /cleaning path — no new top-level route, so App.tsx's own page routing is untouched). The
+ * selection/cleanup flow (review/cleanupConfirm/cleanupProgress/cleanupResults) depends on in-memory
+ * selection Maps and a manifest that aren't meaningfully reconstructable from a URL, so it
+ * deliberately doesn't touch the address bar at all — reloading mid-flow already falls back to
+ * Landing today, and that isn't something this change is meant to fix.
+ */
+const URL_SYNCED_VIEWS = new Set<View>(["landing", "dashboard", "onedrive", "sharepoint", "teams"]);
+
+function cleaningUrlFor(view: View, activeGroup: TenantGroup | null): string {
+  if (view === "landing" || !activeGroup) return "/cleaning";
+  const params = new URLSearchParams({ group: activeGroup.domain, view });
+  return `/cleaning?${params.toString()}`;
+}
+
+/** Reads `?group=&view=` back out, resolving `group` against the just-loaded list — used both on initial mount (deep link / reload) and browser Back/Forward. Falls back to Landing whenever the URL doesn't name a real, currently-visible group. */
+function cleaningStateFromUrl(groups: TenantGroup[]): { view: View; group: TenantGroup | null } {
+  const params = new URLSearchParams(window.location.search);
+  const domain = params.get("group");
+  const urlView = params.get("view") as View | null;
+  const group = domain ? groups.find((g) => g.domain === domain) ?? null : null;
+  if (!group || !urlView || !URL_SYNCED_VIEWS.has(urlView) || urlView === "landing") {
+    return { view: "landing", group: null };
+  }
+  return { view: urlView, group };
+}
+
 function groupConnectionsByDomain(connections: CleaningConnectionRow[]): TenantGroup[] {
   const byDomain = new Map<string, TenantGroup>();
   for (const c of connections) {
@@ -127,11 +155,50 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
   const [reconciliationBanner, setReconciliationBanner] = useState<string | null>(null);
 
+  // Guards the URL-sync effect below from firing with the pre-restore default state (view="landing",
+  // no group) before the initial deep-link/reload restore below has had a chance to run — otherwise
+  // it would clobber a real "?group=&view=" URL back to plain "/cleaning" for one render, and the
+  // resulting extra history entry would make Back one click short once the real state comes in.
+  const urlRestoredRef = useRef(false);
+
   useEffect(() => {
     listCleaningConnections()
-      .then(({ connections }) => setGroups(groupConnectionsByDomain(connections)))
-      .finally(() => setLoadingGroups(false));
+      .then(({ connections }) => {
+        const nextGroups = groupConnectionsByDomain(connections);
+        setGroups(nextGroups);
+        const restored = cleaningStateFromUrl(nextGroups);
+        if (restored.group) {
+          setActiveGroup(restored.group);
+          setView(restored.view);
+        }
+      })
+      .finally(() => {
+        setLoadingGroups(false);
+        urlRestoredRef.current = true;
+      });
   }, []);
+
+  // Keeps the address bar naming the tenant + sub-view actually on screen — see URL_SYNCED_VIEWS.
+  useEffect(() => {
+    if (!urlRestoredRef.current || !URL_SYNCED_VIEWS.has(view)) return;
+    const url = cleaningUrlFor(view, activeGroup);
+    if (`${window.location.pathname}${window.location.search}` !== url) {
+      window.history.pushState({}, "", url);
+    }
+  }, [view, activeGroup]);
+
+  // Browser Back/Forward while inside Cleaning — App.tsx's own popstate listener only tracks which
+  // top-level page (Clouds/Cleaning/Reports) is showing; the tenant + sub-view within Cleaning is
+  // this component's own concern, read straight back out of the URL.
+  useEffect(() => {
+    function onPopState() {
+      const restored = cleaningStateFromUrl(groups);
+      setActiveGroup(restored.group);
+      setView(restored.view);
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [groups]);
 
   /**
    * Runs after a sync completes: refreshes lastSyncedAt for the Dashboard/Landing display, then —
