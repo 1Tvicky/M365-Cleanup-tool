@@ -345,7 +345,23 @@ function Landing({ groups, loading, onOpen }: { groups: TenantGroup[]; loading: 
   );
 }
 
-function ServiceCard({ icon, name, stats, action, onClick, disabled }: { icon: string; name: string; stats: React.ReactNode; action: string; onClick: () => void; disabled?: boolean }) {
+function ServiceCard({
+  icon,
+  name,
+  stats,
+  action,
+  onClick,
+  disabled,
+  syncControl,
+}: {
+  icon: string;
+  name: string;
+  stats: React.ReactNode;
+  action: string;
+  onClick: () => void;
+  disabled?: boolean;
+  syncControl?: React.ReactNode;
+}) {
   return (
     <div className="w-64 rounded-xl border border-slate-200 bg-white p-5">
       <div className="mb-3 flex items-center gap-2">
@@ -360,6 +376,7 @@ function ServiceCard({ icon, name, stats, action, onClick, disabled }: { icon: s
       >
         {action}
       </button>
+      {syncControl}
     </div>
   );
 }
@@ -381,6 +398,105 @@ function syncResourceLabel(
   return "✗"; // genuinely 'failed' or 'cancelled' — the sync job itself didn't complete
 }
 
+/**
+ * Self-contained per-cloud sync control — each of OneDrive/SharePoint/Teams gets its own instance,
+ * its own "Last synced" timestamp, and its own independent Sync button, so syncing one never blocks
+ * or bundles in the others; the user decides exactly what to sync. `startSync` is called with only
+ * this one connectionId (the backend already treats sync concurrency per-connection, not per-tenant,
+ * for this exact reason).
+ */
+function CloudSyncControl({
+  connectionId,
+  cloudType,
+  lastSyncedAt,
+  onSyncFinished,
+}: {
+  connectionId: string;
+  /** Which of the operation's byResource slots belongs to this card — must be explicit, not guessed, since an operation can (e.g. an older bundled sync) have more than one slot populated. */
+  cloudType: "onedrive" | "sharepoint" | "teams";
+  lastSyncedAt: string | null;
+  onSyncFinished: () => void;
+}) {
+  const [syncOperationId, setSyncOperationId] = useState<string | null>(null);
+  const [syncOperation, setSyncOperation] = useState<CleaningSyncOperation | null>(null);
+  const [syncError, setSyncError] = useState<string | null>(null);
+
+  const isSyncing = syncOperationId != null && (!syncOperation || syncOperation.status === "queued" || syncOperation.status === "running");
+  // A single-connection sync only ever populates exactly one of the three byResource slots.
+  const resourceStatus = syncOperation?.byResource[cloudType];
+
+  // Resumes tracking on mount (navigating away and back, or reloading, shouldn't make an
+  // in-progress or just-finished sync look like it never happened — see the Sync Now bugfix notes).
+  useEffect(() => {
+    getLatestSyncOperation([connectionId])
+      .then(({ operation }) => {
+        if (!operation) return;
+        if (operation.status === "queued" || operation.status === "running") {
+          setSyncOperationId(operation.id);
+        } else {
+          setSyncOperation(operation);
+          onSyncFinished();
+        }
+      })
+      .catch(() => {});
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [connectionId]);
+
+  useEffect(() => {
+    if (!syncOperationId) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      const op = await getSyncOperation(syncOperationId!).catch(() => null);
+      if (cancelled || !op) return;
+      setSyncOperation(op);
+      if (op.status === "queued" || op.status === "running") {
+        timer = setTimeout(poll, 3000);
+      } else {
+        onSyncFinished();
+      }
+    }
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncOperationId]);
+
+  async function handleSync() {
+    setSyncError(null);
+    setSyncOperation(null);
+    try {
+      const { operationId } = await startSync([connectionId]);
+      setSyncOperationId(operationId);
+    } catch (err) {
+      setSyncError(err instanceof ApiClientError ? err.message : "Couldn't start sync. Try again.");
+    }
+  }
+
+  const finishedClassName =
+    resourceStatus?.status === "completed" ? "text-emerald-600" : resourceStatus?.status === "completed_with_errors" ? "text-amber-600" : "text-rose-600";
+
+  return (
+    <div className="mt-3 border-t border-slate-100 pt-3">
+      <div className="flex items-center justify-between gap-2">
+        <div className="text-xs text-slate-400">{lastSyncedAt ? `Last synced ${formatDate(lastSyncedAt)}` : "Not synced yet"}</div>
+        <button
+          onClick={handleSync}
+          disabled={isSyncing}
+          className="shrink-0 rounded-md border border-slate-200 px-2 py-1 text-xs font-semibold text-[#1b2fc4] hover:bg-[#1b2fc4]/5 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          {isSyncing ? "Syncing…" : "Sync"}
+        </button>
+      </div>
+      {isSyncing && resourceStatus && <p className="mt-1 text-xs text-slate-500">{syncResourceLabel(resourceStatus)}</p>}
+      {!isSyncing && resourceStatus && <p className={`mt-1 text-xs ${finishedClassName}`}>{syncResourceLabel(resourceStatus)}</p>}
+      {syncError && <p className="mt-1 text-xs text-rose-600">{syncError}</p>}
+    </div>
+  );
+}
+
 function Dashboard({
   group,
   onOpenOneDrive,
@@ -397,9 +513,6 @@ function Dashboard({
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [sharePointTotals, setSharePointTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
-  const [syncOperationId, setSyncOperationId] = useState<string | null>(null);
-  const [syncOperation, setSyncOperation] = useState<CleaningSyncOperation | null>(null);
-  const [syncError, setSyncError] = useState<string | null>(null);
 
   const refreshTotals = useCallback(() => {
     if (group.onedrive) {
@@ -419,68 +532,14 @@ function Dashboard({
 
   useEffect(refreshTotals, [refreshTotals]);
 
-  async function handleSync() {
-    setSyncError(null);
-    setSyncOperation(null);
-    const connectionIds = [group.onedrive?.id, group.sharepoint?.id, group.teams?.id].filter((id): id is string => Boolean(id));
-    try {
-      const { operationId } = await startSync(connectionIds);
-      setSyncOperationId(operationId);
-    } catch (err) {
-      setSyncError(err instanceof ApiClientError ? err.message : "Couldn't start sync. Try again.");
-    }
+  // Called by whichever CloudSyncControl (OneDrive/SharePoint/Teams) just finished — cheap to
+  // refresh all of this dashboard's own totals regardless of which one it was, and the parent page
+  // always needs to re-check lastSyncedAt/reconcile the selection either way.
+  function handleCloudSyncFinished() {
+    refreshTotals();
+    if (group.teams) getTeamsSummary(group.teams.id).then(setTeamsSummary).catch(() => {});
+    onSyncFinished();
   }
-
-  const isSyncing = syncOperationId != null && (!syncOperation || syncOperation.status === "queued" || syncOperation.status === "running");
-
-  // Checks whether a sync is already running (or just finished) for this tenant whenever this
-  // component mounts — without this, sync progress only ever lived in this component's own state,
-  // so navigating away and back (or reloading) made an in-progress sync look "stopped" even though
-  // it kept running server-side. Resumes polling if still in flight; if it already finished, syncs
-  // this component's display and tells the parent to refresh lastSyncedAt/reconcile the selection.
-  useEffect(() => {
-    const connectionIds = [group.onedrive?.id, group.sharepoint?.id, group.teams?.id].filter((id): id is string => Boolean(id));
-    if (connectionIds.length === 0) return;
-    getLatestSyncOperation(connectionIds)
-      .then(({ operation }) => {
-        if (!operation) return;
-        if (operation.status === "queued" || operation.status === "running") {
-          setSyncOperationId(operation.id);
-        } else {
-          setSyncOperation(operation);
-          onSyncFinished();
-        }
-      })
-      .catch(() => {});
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [group.onedrive?.id, group.sharepoint?.id, group.teams?.id]);
-
-  // Polls (same 3s self-rearming pattern as the Teams summary poll below) while the sync is in
-  // flight, then refreshes this dashboard's own totals and tells the parent page to re-check
-  // lastSyncedAt and reconcile the current selection against whatever the sync just found.
-  useEffect(() => {
-    if (!syncOperationId) return;
-    let cancelled = false;
-    let timer: ReturnType<typeof setTimeout>;
-    async function poll() {
-      const op = await getSyncOperation(syncOperationId!).catch(() => null);
-      if (cancelled || !op) return;
-      setSyncOperation(op);
-      if (op.status === "queued" || op.status === "running") {
-        timer = setTimeout(poll, 3000);
-      } else {
-        refreshTotals();
-        if (group.teams) getTeamsSummary(group.teams.id).then(setTeamsSummary).catch(() => {});
-        onSyncFinished();
-      }
-    }
-    poll();
-    return () => {
-      cancelled = true;
-      clearTimeout(timer);
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [syncOperationId]);
 
   useEffect(() => {
     if (!group.teams) return;
@@ -503,36 +562,7 @@ function Dashboard({
 
   return (
     <div>
-      <div className="mb-5 flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <h2 className="text-base font-semibold text-slate-800">{group.domain}</h2>
-          <p className="mt-0.5 text-xs text-slate-400">{group.lastSyncedAt ? `Last synced ${formatDate(group.lastSyncedAt)}` : "Not synced yet"}</p>
-        </div>
-        <div className="flex flex-col items-end gap-1">
-          <button
-            onClick={handleSync}
-            disabled={isSyncing}
-            className="rounded-md border border-[#1b2fc4] px-4 py-1.5 text-sm font-semibold text-[#1b2fc4] hover:bg-[#1b2fc4]/5 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            {isSyncing ? "Syncing…" : "Sync Now"}
-          </button>
-          {isSyncing && syncOperation && (
-            <div className="flex gap-2 text-xs text-slate-500">
-              {group.onedrive && <span>OneDrive {syncResourceLabel(syncOperation.byResource.onedrive)}</span>}
-              {group.sharepoint && <span>SharePoint {syncResourceLabel(syncOperation.byResource.sharepoint)}</span>}
-              {group.teams && <span>Teams {syncResourceLabel(syncOperation.byResource.teams)}</span>}
-            </div>
-          )}
-          {!isSyncing && syncOperation && syncOperation.status === "completed" && (
-            <p className="text-xs text-emerald-600">✓ Sync completed</p>
-          )}
-          {!isSyncing && syncOperation && syncOperation.status === "completed_with_errors" && (
-            <p className="text-xs text-amber-600">⚠ Sync completed with some errors</p>
-          )}
-          {!isSyncing && syncOperation && syncOperation.status === "failed" && <p className="text-xs text-rose-600">Sync failed</p>}
-          {syncError && <p className="text-xs text-rose-600">{syncError}</p>}
-        </div>
-      </div>
+      <h2 className="mb-5 text-base font-semibold text-slate-800">{group.domain}</h2>
       <div className="flex flex-wrap gap-4">
         <ServiceCard
           icon="☁️"
@@ -554,6 +584,11 @@ function Dashboard({
           action="View Accounts"
           onClick={onOpenOneDrive}
           disabled={!group.onedrive}
+          syncControl={
+            group.onedrive && (
+              <CloudSyncControl connectionId={group.onedrive.id} cloudType="onedrive" lastSyncedAt={group.onedrive.lastSyncedAt} onSyncFinished={handleCloudSyncFinished} />
+            )
+          }
         />
         <ServiceCard
           icon="📁"
@@ -575,6 +610,11 @@ function Dashboard({
           action="View Sites"
           onClick={onOpenSharePoint}
           disabled={!group.sharepoint}
+          syncControl={
+            group.sharepoint && (
+              <CloudSyncControl connectionId={group.sharepoint.id} cloudType="sharepoint" lastSyncedAt={group.sharepoint.lastSyncedAt} onSyncFinished={handleCloudSyncFinished} />
+            )
+          }
         />
         <ServiceCard
           icon="👥"
@@ -598,6 +638,11 @@ function Dashboard({
           action="View Teams"
           onClick={onOpenTeams}
           disabled={!group.teams}
+          syncControl={
+            group.teams && (
+              <CloudSyncControl connectionId={group.teams.id} cloudType="teams" lastSyncedAt={group.teams.lastSyncedAt} onSyncFinished={handleCloudSyncFinished} />
+            )
+          }
         />
       </div>
     </div>

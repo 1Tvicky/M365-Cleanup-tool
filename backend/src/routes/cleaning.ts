@@ -640,6 +640,23 @@ async function hasActiveTenantCleanup(db: Queryable, tenantId: string): Promise<
   return legacyJobs.rows.length > 0;
 }
 
+/**
+ * Per-connection (not tenant-wide) — each cloud has its own independent "Sync" control, so syncing
+ * OneDrive must not be blocked by, or block, a SharePoint/Teams sync for the same tenant. Only
+ * `hasActiveTenantSync` (tenant-wide) still guards cleanup, which can span every connection at once.
+ */
+async function hasActiveConnectionSync(db: Queryable, connectionId: string, cloudType: CloudType): Promise<boolean> {
+  if (cloudType === "teams") {
+    const result = await db.query(
+      `SELECT 1 FROM cleaning_scans WHERE connection_id = $1 AND scan_type = 'teams_structure' AND status IN ('queued', 'running') LIMIT 1`,
+      [connectionId]
+    );
+    return result.rows.length > 0;
+  }
+  const result = await db.query(`SELECT 1 FROM sync_jobs WHERE connection_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [connectionId]);
+  return result.rows.length > 0;
+}
+
 async function hasActiveTenantSync(db: Queryable, tenantId: string): Promise<boolean> {
   const result = await db.query(
     `SELECT 1 FROM cleaning_sync_operations so
@@ -1056,8 +1073,11 @@ cleaningRouter.post(
       if (await hasActiveTenantCleanup(db, tenantId)) {
         throw new ApiError(409, "CLEANUP_IN_PROGRESS", "A cleanup is in progress for this connection — try again once it finishes");
       }
-      if (await hasActiveTenantSync(db, tenantId)) {
-        throw new ApiError(409, "SYNC_ALREADY_RUNNING", "A sync is already in progress for this connection");
+      for (const conn of connectionRows.rows) {
+        if (conn.status === "disconnected") continue;
+        if (await hasActiveConnectionSync(db, conn.id, conn.cloud_type)) {
+          throw new ApiError(409, "SYNC_ALREADY_RUNNING", "A sync is already in progress for this connection");
+        }
       }
 
       let newOnedriveSyncJobId: string | null = null;
@@ -1242,10 +1262,16 @@ cleaningRouter.get(
 );
 
 /**
- * GET /api/cleaning/sync/latest?connectionIds=a,b,c — the most recent sync for this tenant, if any.
- * Lets the Cleaning page resume tracking a sync after navigating away and back (or reloading) —
- * without this, sync progress/status only ever lived in the Dashboard component's local state and
- * was lost the moment it unmounted, even though the sync itself kept running server-side.
+ * GET /api/cleaning/sync/latest?connectionIds=a,b,c — the most recent sync that actually touched
+ * one of these connections, if any. Lets the Cleaning page resume tracking a sync after navigating
+ * away and back (or reloading) — without this, sync progress/status only ever lived in the
+ * Dashboard component's local state and was lost the moment it unmounted, even though the sync
+ * itself kept running server-side.
+ *
+ * Deliberately scoped to "an operation whose sub-resource's own connection_id is one of these" —
+ * not just "the tenant's latest operation" — since a per-connection CloudSyncControl (one per
+ * cloud) must never surface a DIFFERENT connection's sync just because it happens to be the most
+ * recent thing this tenant did (e.g. an older bundled operation that also touched another cloud).
  */
 cleaningRouter.get(
   "/sync/latest",
@@ -1266,8 +1292,15 @@ cleaningRouter.get(
     const tenantId = accessResults[0]!.tenantId;
 
     const opResult = await query<SyncOperationRow>(
-      `SELECT ${SYNC_OPERATION_COLUMNS} FROM cleaning_sync_operations WHERE tenant_id = $1 ORDER BY created_at DESC LIMIT 1`,
-      [tenantId]
+      `SELECT cso.id, cso.started_at, cso.onedrive_sync_job_id, cso.sharepoint_sync_job_id, cso.teams_scan_id
+       FROM cleaning_sync_operations cso
+       LEFT JOIN sync_jobs sj1 ON sj1.id = cso.onedrive_sync_job_id
+       LEFT JOIN sync_jobs sj2 ON sj2.id = cso.sharepoint_sync_job_id
+       LEFT JOIN cleaning_scans cs ON cs.id = cso.teams_scan_id
+       WHERE cso.tenant_id = $1
+         AND (sj1.connection_id = ANY($2::uuid[]) OR sj2.connection_id = ANY($2::uuid[]) OR cs.connection_id = ANY($2::uuid[]))
+       ORDER BY cso.created_at DESC LIMIT 1`,
+      [tenantId, connectionIds]
     );
     const op = opResult.rows[0];
     res.json({ operation: op ? await buildSyncOperationResult(op) : null });
