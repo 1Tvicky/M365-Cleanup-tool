@@ -100,8 +100,34 @@ cleaningRouter.get(
   })
 );
 
+/**
+ * Keyset pagination must key off the actual ORDER BY columns, not an unrelated id — a UUID primary
+ * key has no relationship to storage-size or name order, so filtering by "id > lastId" while
+ * sorting by storage/name lets the same top rows reappear on "page 2" instead of continuing where
+ * page 1 left off. The cursor therefore encodes the last row's (sort value, id) pair, not just id.
+ */
+interface ResourceCursor {
+  id: string;
+  storage?: number;
+  name?: string;
+}
+
+function encodeCursor(c: ResourceCursor): string {
+  return Buffer.from(JSON.stringify(c)).toString("base64url");
+}
+
+function decodeCursor(cursor: string | null): ResourceCursor | null {
+  if (!cursor) return null;
+  try {
+    return JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+  } catch {
+    return null; // a garbled/foreign cursor just restarts from the top rather than 500ing
+  }
+}
+
 /** Shared by OneDrive and SharePoint — both read connection_users directly, no Graph calls, no job. */
 async function listCleaningResources(connectionId: string, opts: { search: string | null; sort: "storage" | "name"; cursor: string | null; limit: number }) {
+  const cursor = decodeCursor(opts.cursor);
   const result = await query<{
     id: string;
     display_name: string | null;
@@ -114,10 +140,16 @@ async function listCleaningResources(connectionId: string, opts: { search: strin
      FROM connection_users
      WHERE connection_id = $1
        AND ($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')
-       AND ($3::uuid IS NULL OR id > $3)
-     ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "display_name NULLS LAST"}, id
-     LIMIT $4`,
-    [connectionId, opts.search, opts.cursor, opts.limit]
+       AND (
+         $3::uuid IS NULL OR
+         CASE WHEN $6 = 'storage'
+           THEN (storage_used_bytes < $4::bigint) OR (storage_used_bytes = $4::bigint AND id > $3::uuid)
+           ELSE (COALESCE(display_name, upn) > $5::text) OR (COALESCE(display_name, upn) = $5::text AND id > $3::uuid)
+         END
+       )
+     ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
+     LIMIT $7`,
+    [connectionId, opts.search, cursor?.id ?? null, cursor?.storage ?? null, cursor?.name ?? null, opts.sort, opts.limit]
   );
 
   const rows: CleaningResourceRow[] = result.rows.map((r) => ({
@@ -128,7 +160,13 @@ async function listCleaningResources(connectionId: string, opts: { search: strin
     itemCount: r.item_count,
     status: r.sync_status as CleaningResourceRow["status"],
   }));
-  return { rows, nextCursor: rows.length === opts.limit ? rows[rows.length - 1]!.id : null };
+
+  const last = result.rows[result.rows.length - 1];
+  const nextCursor =
+    rows.length === opts.limit && last
+      ? encodeCursor({ id: last.id, storage: Number(last.storage_used_bytes), name: last.display_name ?? last.upn })
+      : null;
+  return { rows, nextCursor };
 }
 
 function parseListQuery(req: { query: Record<string, unknown> }) {

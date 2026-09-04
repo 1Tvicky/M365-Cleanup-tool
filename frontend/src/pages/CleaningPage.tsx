@@ -352,51 +352,86 @@ function Dashboard({ group, onOpenOneDrive, onOpenSharePoint, onOpenTeams }: { g
   );
 }
 
+/**
+ * Real page-by-page navigation (Prev/Back included) over the backend's keyset (cursor) pagination,
+ * which is itself forward-only — going "back" means re-using a cursor we've already seen rather
+ * than asking the server for one. Each page's rows and the cursor that produced the NEXT page are
+ * cached by page index, so Previous is instant (no re-fetch) and only Next past the last-seen page
+ * hits the network. Search/sort changes reset everything back to page 1.
+ */
 function usePagedList<T extends { id: string }>(
   fetcher: (opts: { search?: string; sort?: "storage" | "name"; cursor?: string | null }) => Promise<{ rows: T[]; nextCursor: string | null }>,
   search: string,
   sort?: "storage" | "name"
 ) {
-  const [rows, setRows] = useState<T[]>([]);
-  const [cursor, setCursor] = useState<string | null>(null);
+  const [pageIndex, setPageIndex] = useState(0);
+  // pages[i] = rows shown on page i (0-based); cursors[i] = the cursor used to FETCH page i+1 (i.e. nextCursor returned by page i).
+  const [pages, setPages] = useState<T[][]>([]);
+  const [cursors, setCursors] = useState<(string | null)[]>([null]);
   const [loading, setLoading] = useState(true);
-  const [loadingMore, setLoadingMore] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const debouncedSearch = useDebouncedValue(search, 300);
   const requestId = useRef(0);
 
+  const fetchPage = useCallback(
+    (index: number, cursor: string | null) => {
+      const id = ++requestId.current;
+      setLoading(true);
+      setError(null);
+      fetcher({ search: debouncedSearch, sort, cursor })
+        .then(({ rows: r, nextCursor }) => {
+          if (id !== requestId.current) return;
+          setPages((prev) => {
+            const next = [...prev];
+            next[index] = r;
+            return next;
+          });
+          setCursors((prev) => {
+            const next = [...prev];
+            next[index + 1] = nextCursor;
+            return next;
+          });
+        })
+        .catch((err) => {
+          if (id !== requestId.current) return;
+          setError(err instanceof ApiClientError ? err.message : "Couldn't load this data. Try again.");
+        })
+        .finally(() => {
+          if (id === requestId.current) setLoading(false);
+        });
+    },
+    [debouncedSearch, sort, fetcher]
+  );
+
+  // Search/sort changed — start over from page 1.
   useEffect(() => {
-    const id = ++requestId.current;
-    setLoading(true);
-    setError(null);
-    fetcher({ search: debouncedSearch, sort, cursor: null })
-      .then(({ rows: r, nextCursor }) => {
-        if (id !== requestId.current) return;
-        setRows(r);
-        setCursor(nextCursor);
-      })
-      .catch((err) => {
-        if (id !== requestId.current) return;
-        setError(err instanceof ApiClientError ? err.message : "Couldn't load this data. Try again.");
-      })
-      .finally(() => {
-        if (id === requestId.current) setLoading(false);
-      });
+    setPageIndex(0);
+    setPages([]);
+    setCursors([null]);
+    fetchPage(0, null);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, sort]);
 
-  const loadMore = useCallback(() => {
-    if (!cursor) return;
-    setLoadingMore(true);
-    fetcher({ search: debouncedSearch, sort, cursor })
-      .then(({ rows: r, nextCursor }) => {
-        setRows((prev) => [...prev, ...r]);
-        setCursor(nextCursor);
-      })
-      .finally(() => setLoadingMore(false));
-  }, [cursor, debouncedSearch, sort, fetcher]);
+  const goNext = useCallback(() => {
+    const nextIndex = pageIndex + 1;
+    setPageIndex(nextIndex);
+    if (!pages[nextIndex]) fetchPage(nextIndex, cursors[nextIndex] ?? null);
+  }, [pageIndex, pages, cursors, fetchPage]);
 
-  return { rows, loading, loadingMore, error, hasMore: cursor !== null, loadMore };
+  const goPrevious = useCallback(() => {
+    setPageIndex((i) => Math.max(0, i - 1));
+  }, []);
+
+  return {
+    rows: pages[pageIndex] ?? [],
+    loading,
+    error,
+    pageNumber: pageIndex + 1,
+    hasNext: cursors[pageIndex + 1] !== undefined && cursors[pageIndex + 1] !== null,
+    hasPrevious: pageIndex > 0,
+    goNext,
+    goPrevious,
+  };
 }
 
 function toggleInMap<T>(map: Map<string, T>, setMap: (m: Map<string, T>) => void, id: string, row: T) {
@@ -413,7 +448,7 @@ function OneDriveView({ connectionId, selected, setSelected }: { connectionId: s
       listOneDriveAccounts(connectionId, opts).then((r) => ({ rows: r.accounts, nextCursor: r.nextCursor })),
     [connectionId]
   );
-  const { rows, loading, loadingMore, error, hasMore, loadMore } = usePagedList(fetcher, search, sort);
+  const { rows, loading, error, pageNumber, hasNext, hasPrevious, goNext, goPrevious } = usePagedList(fetcher, search, sort);
 
   const columns: DiscoveryColumn<CleaningResourceRow>[] = [
     { label: "User Name", render: (r) => r.name },
@@ -431,10 +466,12 @@ function OneDriveView({ connectionId, selected, setSelected }: { connectionId: s
         columns={columns}
         rows={rows}
         loading={loading}
-        loadingMore={loadingMore}
         error={error}
-        hasMore={hasMore}
-        onLoadMore={loadMore}
+        pageNumber={pageNumber}
+        hasNext={hasNext}
+        hasPrevious={hasPrevious}
+        onNext={goNext}
+        onPrevious={goPrevious}
         search={search}
         onSearchChange={setSearch}
         searchPlaceholder="Search users…"
@@ -466,7 +503,7 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
       listSharePointSites(connectionId, opts).then((r) => ({ rows: r.sites, nextCursor: r.nextCursor })),
     [connectionId]
   );
-  const { rows, loading, loadingMore, error, hasMore, loadMore } = usePagedList(fetcher, search, sort);
+  const { rows, loading, error, pageNumber, hasNext, hasPrevious, goNext, goPrevious } = usePagedList(fetcher, search, sort);
 
   const columns: DiscoveryColumn<CleaningResourceRow>[] = [
     { label: "Site Name", render: (r) => r.name },
@@ -484,10 +521,12 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
         columns={columns}
         rows={rows}
         loading={loading}
-        loadingMore={loadingMore}
         error={error}
-        hasMore={hasMore}
-        onLoadMore={loadMore}
+        pageNumber={pageNumber}
+        hasNext={hasNext}
+        hasPrevious={hasPrevious}
+        onNext={goNext}
+        onPrevious={goPrevious}
         search={search}
         onSearchChange={setSearch}
         searchPlaceholder="Search sites…"
@@ -672,10 +711,12 @@ function TeamsView({
           columns={columns}
           rows={filteredChats}
           loading={loading}
-          loadingMore={false}
           error={error}
-          hasMore={false}
-          onLoadMore={() => {}}
+          pageNumber={1}
+          hasNext={false}
+          hasPrevious={false}
+          onNext={() => {}}
+          onPrevious={() => {}}
           search={search}
           onSearchChange={setSearch}
           searchPlaceholder="Search conversations…"
