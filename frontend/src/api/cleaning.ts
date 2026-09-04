@@ -112,3 +112,112 @@ export function listTeamsDMs(connectionId: string, opts: ListOpts = {}): Promise
 export function calculateTeamsMessageCounts(connectionId: string): Promise<{ status: "queued" }> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/teams/calculate-counts`, { method: "POST" });
 }
+
+/**
+ * Cleanup (deletion) execution. Only 'onedrive_account'/'sharepoint_site' items are ever actually
+ * removed — Microsoft Graph has no application-permission (unattended) path to delete Teams
+ * channel or chat messages, so 'channel'/'chat' items always resolve to 'unsupported', never a
+ * faked success. See the cleanup-execution plan for the full rationale.
+ */
+export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "channel" | "chat";
+export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
+
+/** ids reference the same internal row ids already used by the existing selection Maps (connection_users.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
+export interface CleanupManifest {
+  oneDrive?: { connectionId: string; ids: string[] };
+  sharePoint?: { connectionId: string; ids: string[] };
+  channels?: { connectionId: string; ids: string[] };
+  chats?: { connectionId: string; ids: string[] };
+}
+
+export interface CleanupValidationResult {
+  valid: boolean;
+  summary: { oneDriveAccounts: number; sharePointSites: number; channels: number; chats: number };
+  unsupported: { resourceType: CleanupResourceType; displayName: string }[];
+  errors: string[];
+}
+
+export interface CleanupOperationRow {
+  id: string;
+  status: CleanupOperationStatus;
+  totalItems: number;
+  processedItems: number;
+  successfulItems: number;
+  failedItems: number;
+  skippedItems: number;
+  retryOfOperationId: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelRequestedAt: string | null;
+  createdAt: string;
+  errorMessage: string | null;
+}
+
+export interface CleanupOperationItemRow {
+  id: string;
+  connectionId: string;
+  resourceType: CleanupResourceType;
+  displayName: string;
+  status: CleanupItemStatus;
+  attempts: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface CleanupProgress extends CleanupOperationRow {
+  byType: Record<CleanupResourceType, { total: number; completed: number; failed: number; skipped: number; unsupported: number }>;
+  /** Sum across every OneDrive account / SharePoint site in the operation — 0/0 until file enumeration for at least one item has happened. */
+  filesTotal: number;
+  filesCompleted: number;
+}
+
+/** One row of the live "recently removed" feed on the progress screen. */
+export interface CleanupRecentFile {
+  fileName: string;
+  resourceName: string;
+  status: "deleted" | "already_gone" | "failed";
+  completedAt: string;
+}
+
+export function validateCleanup(manifest: CleanupManifest): Promise<CleanupValidationResult> {
+  return rawFetch(`/api/cleaning/cleanup/validate`, { method: "POST", body: JSON.stringify(manifest) });
+}
+
+export function startCleanup(manifest: CleanupManifest): Promise<{ operationId: string; status: "queued" }> {
+  return rawFetch(`/api/cleaning/cleanup`, { method: "POST", body: JSON.stringify(manifest) });
+}
+
+export function getCleanupProgress(operationId: string): Promise<CleanupProgress> {
+  return rawFetch(`/api/cleaning/cleanup/${operationId}`);
+}
+
+export function getCleanupOperationItems(
+  operationId: string,
+  opts: { status?: CleanupItemStatus; page?: number; pageSize?: number } = {}
+): Promise<{ items: CleanupOperationItemRow[] } & PageResult<CleanupOperationItemRow>> {
+  const params = new URLSearchParams();
+  if (opts.status) params.set("status", opts.status);
+  params.set("page", String(opts.page ?? 1));
+  params.set("pageSize", String(opts.pageSize ?? 20));
+  return rawFetch(`/api/cleaning/cleanup/${operationId}/items?${params.toString()}`);
+}
+
+export function cancelCleanup(operationId: string): Promise<{ status: "cancel_requested" }> {
+  return rawFetch(`/api/cleaning/cleanup/${operationId}/cancel`, { method: "POST" });
+}
+
+export function getCleanupRecentFiles(operationId: string, limit = 10): Promise<{ files: CleanupRecentFile[] }> {
+  return rawFetch(`/api/cleaning/cleanup/${operationId}/recent-files?limit=${limit}`);
+}
+
+/** Not a rawFetch call — the report is a CSV file download (Content-Disposition: attachment), which a plain navigation/anchor click handles natively (cookies included automatically, same origin). */
+export function cleanupReportUrl(operationId: string): string {
+  return `/api/cleaning/cleanup/${operationId}/report`;
+}
+
+export function retryCleanup(operationId: string): Promise<{ operationId: string; status: "queued" }> {
+  return rawFetch(`/api/cleaning/cleanup/${operationId}/retry`, { method: "POST" });
+}

@@ -62,3 +62,68 @@ export interface CleaningTeamsSummary {
   structureScan: CleaningScanRow | null;
   countScan: CleaningScanRow | null;
 }
+
+/** Cleanup (deletion) execution phase — see docs/cleanup-execution plan. Only onedrive_account/sharepoint_site are ever actually executed against Graph; channel/chat always resolve to 'unsupported' (Microsoft Graph has no application-permission path to delete Teams channel/chat messages — delegated-only). */
+export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "channel" | "chat";
+export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
+export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
+
+/** One slot per resource family; `ids` reference the same internal row ids already used by the existing selection state (connection_users.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
+export interface CleanupManifest {
+  oneDrive?: { connectionId: string; ids: string[] };
+  sharePoint?: { connectionId: string; ids: string[] };
+  channels?: { connectionId: string; ids: string[] };
+  chats?: { connectionId: string; ids: string[] };
+}
+
+export interface CleanupValidationResult {
+  valid: boolean;
+  summary: { oneDriveAccounts: number; sharePointSites: number; channels: number; chats: number };
+  /** Selected items that can never be executed under this app's Graph permissions — reported here, not in errors, since selecting them isn't invalid, just not actionable yet. */
+  unsupported: { resourceType: CleanupResourceType; displayName: string }[];
+  errors: string[];
+}
+
+export interface CleanupOperationRow {
+  id: string;
+  status: CleanupOperationStatus;
+  totalItems: number;
+  processedItems: number;
+  successfulItems: number;
+  failedItems: number;
+  skippedItems: number;
+  retryOfOperationId: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+  cancelRequestedAt: string | null;
+  createdAt: string;
+  errorMessage: string | null;
+}
+
+export interface CleanupOperationItemRow {
+  id: string;
+  connectionId: string;
+  resourceType: CleanupResourceType;
+  displayName: string;
+  status: CleanupItemStatus;
+  attempts: number;
+  startedAt: string | null;
+  completedAt: string | null;
+  errorCode: string | null;
+  errorMessage: string | null;
+}
+
+export interface CleanupProgress extends CleanupOperationRow {
+  byType: Record<CleanupResourceType, { total: number; completed: number; failed: number; skipped: number; unsupported: number }>;
+  /** Sum of cleanup_operation_items.files_total/files_completed across the whole operation — 0/0 until file enumeration for at least one item has happened. */
+  filesTotal: number;
+  filesCompleted: number;
+}
+
+/** One row of the live "recently removed" feed on the progress screen — the same data the CSV report is built from. */
+export interface CleanupRecentFile {
+  fileName: string;
+  resourceName: string;
+  status: "deleted" | "already_gone" | "failed";
+  completedAt: string;
+}

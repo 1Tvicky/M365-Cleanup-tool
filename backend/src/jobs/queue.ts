@@ -48,3 +48,18 @@ export async function enqueueCleaningScanJob(payload: CleaningScanJobPayload): P
     removeOnFail: false,
   });
 }
+
+/** One job per confirmed Cleaning cleanup/deletion run. Deliberately named differently from the legacy "cleanup-jobs" queue above — see jobs/cleanupExecutionWorker.ts. */
+export const cleanupExecutionQueue = new Queue("cleanup-execution-jobs", { connection });
+
+export interface CleanupExecutionJobPayload {
+  operationId: string; // cleanup_operations.id — worker looks up tenant/items from Postgres by this id
+}
+
+export async function enqueueCleanupExecutionJob(payload: CleanupExecutionJobPayload): Promise<void> {
+  await cleanupExecutionQueue.add("run-cleanup-execution", payload, {
+    attempts: 1,
+    removeOnComplete: { age: 60 * 60 * 24 * 30 },
+    removeOnFail: false,
+  });
+}

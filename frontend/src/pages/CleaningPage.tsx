@@ -12,12 +12,16 @@ import {
   type CleaningConnectionRow,
   type CleaningResourceRow,
   type CleaningTeamsSummary,
+  type CleanupManifest,
   type PageResult,
 } from "../api/cleaning";
 import { ApiClientError } from "../api/client";
 import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../components/cleaning/DiscoveryTable";
 import { TeamsChannels } from "../components/cleaning/TeamsChannels";
 import { SelectionSummary, hasSelection, messagesFragment, type SelectionTotals } from "../components/cleaning/SelectionSummary";
+import { CleanupConfirmation } from "../components/cleaning/CleanupConfirmation";
+import { CleanupProgressView } from "../components/cleaning/CleanupProgress";
+import { CleanupResultsView } from "../components/cleaning/CleanupResults";
 import { formatBytes, formatDate } from "../utils/format";
 
 interface TenantGroup {
@@ -31,7 +35,23 @@ interface TenantGroup {
   teams?: CleaningConnectionRow;
 }
 
-type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "review";
+type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "review" | "cleanupConfirm" | "cleanupProgress" | "cleanupResults";
+
+/** Only 'oneDrive'/'sharePoint' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
+function buildCleanupManifest(
+  group: TenantGroup,
+  selectedOneDrive: Map<string, CleaningResourceRow>,
+  selectedSharePoint: Map<string, CleaningResourceRow>,
+  selectedChannels: Map<string, CleaningChannelRow>,
+  selectedChats: Map<string, CleaningChatRow>
+): CleanupManifest {
+  const manifest: CleanupManifest = {};
+  if (selectedOneDrive.size > 0 && group.onedrive) manifest.oneDrive = { connectionId: group.onedrive.id, ids: [...selectedOneDrive.keys()] };
+  if (selectedSharePoint.size > 0 && group.sharepoint) manifest.sharePoint = { connectionId: group.sharepoint.id, ids: [...selectedSharePoint.keys()] };
+  if (selectedChannels.size > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: [...selectedChannels.keys()] };
+  if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
+  return manifest;
+}
 
 /**
  * Distinguishes "still working on it" from "gave up" from "genuinely counted zero" — conflating
@@ -71,6 +91,7 @@ export function CleaningPage() {
   const [selectedSharePoint, setSelectedSharePoint] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
+  const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
 
   useEffect(() => {
     listCleaningConnections()
@@ -123,7 +144,44 @@ export function CleaningPage() {
   }
 
   if (view === "review") {
-    return <ReviewPage totals={totals} onBack={() => setView("dashboard")} />;
+    return <ReviewPage totals={totals} onBack={() => setView("dashboard")} onContinue={() => setView("cleanupConfirm")} />;
+  }
+
+  if (view === "cleanupConfirm" && activeGroup) {
+    return (
+      <CleanupConfirmation
+        manifest={buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedChannels, selectedChats)}
+        onBack={() => setView("review")}
+        onStarted={(operationId) => {
+          setCleanupOperationId(operationId);
+          setView("cleanupProgress");
+        }}
+      />
+    );
+  }
+
+  if (view === "cleanupProgress" && cleanupOperationId) {
+    return <CleanupProgressView operationId={cleanupOperationId} onFinished={() => setView("cleanupResults")} />;
+  }
+
+  if (view === "cleanupResults" && cleanupOperationId) {
+    return (
+      <CleanupResultsView
+        operationId={cleanupOperationId}
+        onRetried={(newOperationId) => {
+          setCleanupOperationId(newOperationId);
+          setView("cleanupProgress");
+        }}
+        onDone={() => {
+          setSelectedOneDrive(new Map());
+          setSelectedSharePoint(new Map());
+          setSelectedChannels(new Map());
+          setSelectedChats(new Map());
+          setCleanupOperationId(null);
+          setView("dashboard");
+        }}
+      />
+    );
   }
 
   // Only shown on the actual selection tables — not on the dashboard or landing page, where it
@@ -715,7 +773,7 @@ function TeamsView({
   );
 }
 
-function ReviewPage({ totals, onBack }: { totals: SelectionTotals; onBack: () => void }) {
+function ReviewPage({ totals, onBack, onContinue }: { totals: SelectionTotals; onBack: () => void; onContinue: () => void }) {
   const totalBytes = totals.oneDriveBytes + totals.sharePointBytes;
   const totalMessages = totals.teamsMessages + totals.dmMessages;
 
@@ -762,13 +820,18 @@ function ReviewPage({ totals, onBack }: { totals: SelectionTotals; onBack: () =>
         </div>
       </div>
 
-      <p className="mt-6 rounded-lg border border-dashed border-slate-300 px-4 py-4 text-center text-sm text-slate-500">
-        Cleanup actions will be available here after selection review.
-      </p>
-
-      <button onClick={onBack} className="mt-6 rounded-md border border-slate-200 px-5 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">
-        ← Back
-      </button>
+      <div className="mt-6 flex items-center gap-3">
+        <button onClick={onBack} className="rounded-md border border-slate-200 px-5 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+          ← Back
+        </button>
+        <button
+          onClick={onContinue}
+          disabled={!hasSelection(totals)}
+          className="rounded-md bg-[#1b2fc4] px-5 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+        >
+          Continue to Cleanup →
+        </button>
+      </div>
     </div>
   );
 }

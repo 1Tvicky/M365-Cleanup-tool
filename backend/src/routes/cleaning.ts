@@ -1,11 +1,27 @@
 import { Router } from "express";
-import { query } from "../db/pool.js";
+import { z } from "zod";
+import { query, withTransaction } from "../db/pool.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireSession } from "../middleware/auth.js";
-import { enqueueCleaningScanJob } from "../jobs/queue.js";
+import { enqueueCleaningScanJob, enqueueCleanupExecutionJob } from "../jobs/queue.js";
 import { ApiError } from "../types/index.js";
+import type { OperatorRole } from "../types/index.js";
 import type { CloudType } from "../types/connections.js";
-import type { CleaningChannelRow, CleaningChatRow, CleaningResourceRow, CleaningScanRow, CleaningTeamsSummary } from "../types/cleaning.js";
+import type {
+  CleaningChannelRow,
+  CleaningChatRow,
+  CleaningResourceRow,
+  CleaningScanRow,
+  CleaningTeamsSummary,
+  CleanupManifest,
+  CleanupOperationItemRow,
+  CleanupOperationRow,
+  CleanupOperationStatus,
+  CleanupProgress,
+  CleanupRecentFile,
+  CleanupResourceType,
+  CleanupValidationResult,
+} from "../types/cleaning.js";
 
 /**
  * Cleaning module (discovery phase) — read-only, reuses the Add Clouds/Manage Clouds `connections`
@@ -212,6 +228,17 @@ function needsRetry(scan: CleaningScanRow): boolean {
   return false;
 }
 
+/** True if a not-yet-finished cleanup operation touches this connection — used to avoid a discovery scan racing a live deletion (harmless given cleanup snapshots its own data, but wastes throttle budget and confuses the UI mid-delete). */
+async function hasActiveCleanup(connectionId: string): Promise<boolean> {
+  const result = await query(
+    `SELECT 1 FROM cleanup_operation_items coi
+     JOIN cleanup_operations co ON co.id = coi.cleanup_operation_id
+     WHERE coi.connection_id = $1 AND co.status IN ('queued', 'running') LIMIT 1`,
+    [connectionId]
+  );
+  return result.rows.length > 0;
+}
+
 async function startScan(connectionId: string, scanType: "teams_structure" | "message_counts"): Promise<void> {
   const inserted = await query<{ id: string }>(`INSERT INTO cleaning_scans (connection_id, scan_type) VALUES ($1, $2) RETURNING id`, [
     connectionId,
@@ -229,7 +256,7 @@ cleaningRouter.get(
     const connectionId = req.params.id!;
 
     let structureScan = await latestScan(connectionId, "teams_structure");
-    if (!structureScan || needsRetry(structureScan)) {
+    if ((!structureScan || needsRetry(structureScan)) && !(await hasActiveCleanup(connectionId))) {
       await startScan(connectionId, "teams_structure");
       structureScan = await latestScan(connectionId, "teams_structure");
     }
@@ -370,8 +397,579 @@ cleaningRouter.post(
     if (running.rows.length > 0) {
       throw new ApiError(409, "SCAN_ALREADY_RUNNING", "Message counting is already in progress for this connection");
     }
+    if (await hasActiveCleanup(connectionId)) {
+      throw new ApiError(409, "CLEANUP_IN_PROGRESS", "A cleanup is in progress for this connection");
+    }
 
     await startScan(connectionId, "message_counts");
     res.status(202).json({ status: "queued" });
+  })
+);
+
+/**
+ * Cleanup (deletion) execution — see the cleanup-execution plan for the full design rationale.
+ * Not connection-scoped in the URL: the existing Review-your-selection screen already aggregates
+ * a selection across up to 3 connections of one tenant (OneDrive/SharePoint/Teams), so a cleanup
+ * operation must be able to span all of them. The tenant is never accepted from the client — it's
+ * derived from, and cross-checked against, every connectionId the manifest actually references.
+ */
+
+const manifestSlotSchema = z.object({ connectionId: z.string().uuid(), ids: z.array(z.string().uuid()).min(1) });
+const cleanupManifestSchema = z.object({
+  oneDrive: manifestSlotSchema.optional(),
+  sharePoint: manifestSlotSchema.optional(),
+  channels: manifestSlotSchema.optional(),
+  chats: manifestSlotSchema.optional(),
+});
+
+/** `viewer` can validate; only `cleanup_admin` can execute/cancel/retry — mirrors the split routes/cleanup.ts already establishes for the legacy pipeline. */
+async function requireCleanupAdmin(tenantId: string, operatorId: string): Promise<void> {
+  const result = await query<{ role: OperatorRole }>(`SELECT role FROM tenant_roles WHERE tenant_id = $1 AND operator_id = $2`, [
+    tenantId,
+    operatorId,
+  ]);
+  if (result.rows[0]?.role !== "cleanup_admin") {
+    throw new ApiError(403, "FORBIDDEN", "Requires cleanup_admin role on this tenant");
+  }
+}
+
+/** Derives the tenant from every connectionId the manifest references (never accepted from the client) and confirms they all agree — a manifest can never legitimately span two tenants. */
+async function resolveManifestTenant(manifest: CleanupManifest, operatorId: string): Promise<string> {
+  const connectionIds = [
+    ...new Set(
+      [manifest.oneDrive?.connectionId, manifest.sharePoint?.connectionId, manifest.channels?.connectionId, manifest.chats?.connectionId].filter(
+        (id): id is string => Boolean(id)
+      )
+    ),
+  ];
+  if (connectionIds.length === 0) {
+    throw new ApiError(400, "EMPTY_MANIFEST", "Nothing selected");
+  }
+
+  const results = await Promise.all(connectionIds.map((id) => requireConnectionAccess(id, operatorId)));
+  const tenantIds = new Set(results.map((r) => r.tenantId));
+  if (tenantIds.size > 1) {
+    throw new ApiError(400, "TENANT_MISMATCH", "Selected items belong to more than one Microsoft 365 tenant");
+  }
+  return results[0]!.tenantId;
+}
+
+interface ResolvedManifestItem {
+  connectionId: string;
+  resourceType: CleanupResourceType;
+  resourceId: string;
+  displayName: string;
+  graphRef: Record<string, string>;
+  supported: boolean;
+}
+
+interface Queryable {
+  query<T extends Record<string, unknown> = Record<string, unknown>>(text: string, params?: unknown[]): Promise<{ rows: T[] }>;
+}
+
+/**
+ * Re-checks resource ownership (every id must actually belong to the connection it's claimed
+ * under) and snapshots the Graph-facing ref + display name needed at execution time. Accepts a
+ * `Queryable` so it can run against the plain pool (for /validate) or a transaction client (for
+ * the real, TOCTOU-safe snapshot inside POST /cleanup) with identical logic.
+ */
+async function resolveManifestItems(manifest: CleanupManifest, db: Queryable): Promise<{ items: ResolvedManifestItem[]; errors: string[] }> {
+  const items: ResolvedManifestItem[] = [];
+  const errors: string[] = [];
+
+  if (manifest.oneDrive) {
+    await resolveConnection(manifest.oneDrive.connectionId, "onedrive");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
+      `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.oneDrive.connectionId, manifest.oneDrive.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.oneDrive.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected OneDrive account is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.oneDrive.connectionId,
+        resourceType: "onedrive_account",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        graphRef: { userId: row.graph_user_id },
+        supported: true,
+      });
+    }
+  }
+
+  if (manifest.sharePoint) {
+    await resolveConnection(manifest.sharePoint.connectionId, "sharepoint");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
+      `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.sharePoint.connectionId, manifest.sharePoint.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.sharePoint.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected SharePoint site is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.sharePoint.connectionId,
+        resourceType: "sharepoint_site",
+        resourceId: row.id,
+        // connection_users.graph_user_id doubles as the site's Graph id for sharepoint-type connections (see cloudSyncWorker.ts).
+        displayName: row.display_name ?? row.upn,
+        graphRef: { siteId: row.graph_user_id },
+        supported: true,
+      });
+    }
+  }
+
+  if (manifest.channels) {
+    await resolveConnection(manifest.channels.connectionId, "teams");
+    const result = await db.query<{ id: string; team_id: string; team_name: string; channel_id: string; channel_name: string }>(
+      `SELECT id, team_id, team_name, channel_id, channel_name FROM cleaning_channels WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.channels.connectionId, manifest.channels.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.channels.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Teams channel is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.channels.connectionId,
+        resourceType: "channel",
+        resourceId: row.id,
+        displayName: `${row.team_name} / ${row.channel_name}`,
+        graphRef: { teamId: row.team_id, channelId: row.channel_id },
+        // Microsoft Graph has no application-permission (unattended) way to delete channel messages — delegated/signed-in-user only.
+        supported: false,
+      });
+    }
+  }
+
+  if (manifest.chats) {
+    await resolveConnection(manifest.chats.connectionId, "teams");
+    const result = await db.query<{ id: string; chat_id: string; participants: { displayName: string | null; upn: string | null }[] }>(
+      `SELECT id, chat_id, participants FROM cleaning_chats WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.chats.connectionId, manifest.chats.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.chats.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected conversation is no longer available`);
+        continue;
+      }
+      const names = row.participants.map((p) => p.displayName ?? p.upn ?? "Unknown").join(" ↔ ");
+      items.push({
+        connectionId: manifest.chats.connectionId,
+        resourceType: "chat",
+        resourceId: row.id,
+        displayName: names || "Conversation",
+        graphRef: { chatId: row.chat_id },
+        // Same Graph limitation as channel messages — no application-permission delete path exists.
+        supported: false,
+      });
+    }
+  }
+
+  return { items, errors };
+}
+
+function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult["summary"] {
+  return {
+    oneDriveAccounts: items.filter((i) => i.resourceType === "onedrive_account").length,
+    sharePointSites: items.filter((i) => i.resourceType === "sharepoint_site").length,
+    channels: items.filter((i) => i.resourceType === "channel").length,
+    chats: items.filter((i) => i.resourceType === "chat").length,
+  };
+}
+
+/** POST /api/cleaning/cleanup/validate — pure dry run, never writes to the database. */
+cleaningRouter.post(
+  "/cleanup/validate",
+  asyncHandler(async (req, res) => {
+    const manifest = cleanupManifestSchema.parse(req.body);
+    await resolveManifestTenant(manifest, req.session!.operatorId); // authorizes every referenced connection; tenant itself isn't needed for a read-only validation
+    const { items, errors } = await resolveManifestItems(manifest, { query });
+
+    const result: CleanupValidationResult = {
+      valid: errors.length === 0,
+      summary: summarizeItems(items),
+      unsupported: items.filter((i) => !i.supported).map((i) => ({ resourceType: i.resourceType, displayName: i.displayName })),
+      errors,
+    };
+    res.json(result);
+  })
+);
+
+/** POST /api/cleaning/cleanup — validates + snapshots + enqueues. Requires cleanup_admin. */
+cleaningRouter.post(
+  "/cleanup",
+  asyncHandler(async (req, res) => {
+    const manifest = cleanupManifestSchema.parse(req.body);
+    const operatorId = req.session!.operatorId;
+    const tenantId = await resolveManifestTenant(manifest, operatorId);
+    await requireCleanupAdmin(tenantId, operatorId);
+
+    const { items, errors } = await resolveManifestItems(manifest, { query });
+    if (errors.length > 0) {
+      throw new ApiError(400, "VALIDATION_FAILED", "Your selection has changed and needs to be reviewed again", { errors });
+    }
+
+    const connectionIds = [...new Set(items.map((i) => i.connectionId))];
+
+    const runningCleanup = await query(`SELECT 1 FROM cleanup_operations WHERE tenant_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [
+      tenantId,
+    ]);
+    if (runningCleanup.rows.length > 0) {
+      throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
+    }
+    // The legacy tenant-scoped Cleanup pipeline (routes/cleanup.ts) is a separate system against the
+    // same tenant — without this check the two could run concurrent, overlapping Graph deletes.
+    const runningLegacyCleanup = await query(
+      `SELECT 1 FROM cleanup_jobs WHERE tenant_id = $1 AND status IN ('export_in_progress', 'queued', 'running') LIMIT 1`,
+      [tenantId]
+    );
+    if (runningLegacyCleanup.rows.length > 0) {
+      throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
+    }
+    if (connectionIds.length > 0) {
+      const runningScan = await query(`SELECT 1 FROM cleaning_scans WHERE connection_id = ANY($1::uuid[]) AND status IN ('queued', 'running') LIMIT 1`, [
+        connectionIds,
+      ]);
+      if (runningScan.rows.length > 0) {
+        throw new ApiError(409, "SCAN_IN_PROGRESS", "Discovery is still running for this connection — try again once it finishes");
+      }
+    }
+
+    const operationId = await withTransaction(async (client) => {
+      // Re-resolve for real here — never trust the pre-check above for what actually gets written,
+      // closing the window between validation and commit.
+      const { items: freshItems, errors: freshErrors } = await resolveManifestItems(manifest, { query: client.query.bind(client) });
+      if (freshErrors.length > 0) {
+        throw new ApiError(400, "VALIDATION_FAILED", "Your selection has changed and needs to be reviewed again", { errors: freshErrors });
+      }
+
+      const unsupportedCount = freshItems.filter((i) => !i.supported).length;
+      const opInsert = await client.query<{ id: string }>(
+        `INSERT INTO cleanup_operations (tenant_id, requested_by, total_items, skipped_items) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [tenantId, operatorId, freshItems.length, unsupportedCount]
+      );
+      const newOperationId = opInsert.rows[0]!.id;
+
+      for (const item of freshItems) {
+        await client.query(
+          `INSERT INTO cleanup_operation_items (cleanup_operation_id, connection_id, resource_type, resource_id, display_name, graph_ref, status)
+           VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+          [
+            newOperationId,
+            item.connectionId,
+            item.resourceType,
+            item.resourceId,
+            item.displayName,
+            JSON.stringify(item.graphRef),
+            item.supported ? "pending" : "unsupported",
+          ]
+        );
+      }
+
+      return newOperationId;
+    });
+
+    for (const connectionId of connectionIds) {
+      await query(`INSERT INTO connection_events (connection_id, tenant_id, event, detail) VALUES ($1, $2, 'cleanup_requested', $3)`, [
+        connectionId,
+        tenantId,
+        { operationId },
+      ]);
+    }
+
+    await enqueueCleanupExecutionJob({ operationId });
+    res.status(202).json({ operationId, status: "queued" });
+  })
+);
+
+/** Same existence-hiding convention as requireConnectionAccess — 404, never 403, for both "doesn't exist" and "no access". */
+async function requireCleanupOperationAccess(operationId: string, operatorId: string, minRole: OperatorRole): Promise<{ tenantId: string }> {
+  const result = await query<{ tenant_id: string }>(`SELECT tenant_id FROM cleanup_operations WHERE id = $1`, [operationId]);
+  const row = result.rows[0];
+  if (!row) throw new ApiError(404, "CLEANUP_OPERATION_NOT_FOUND", "No such cleanup operation");
+
+  const roleResult = await query<{ role: OperatorRole }>(`SELECT role FROM tenant_roles WHERE tenant_id = $1 AND operator_id = $2`, [
+    row.tenant_id,
+    operatorId,
+  ]);
+  const role = roleResult.rows[0]?.role;
+  if (!role || (minRole === "cleanup_admin" && role !== "cleanup_admin")) {
+    throw new ApiError(404, "CLEANUP_OPERATION_NOT_FOUND", "No such cleanup operation");
+  }
+  return { tenantId: row.tenant_id };
+}
+
+function toCleanupOperationRow(r: {
+  id: string;
+  status: string;
+  total_items: number;
+  processed_items: number;
+  successful_items: number;
+  failed_items: number;
+  skipped_items: number;
+  retry_of_operation_id: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  cancel_requested_at: string | null;
+  created_at: string;
+  error_message: string | null;
+}): CleanupOperationRow {
+  return {
+    id: r.id,
+    status: r.status as CleanupOperationStatus,
+    totalItems: r.total_items,
+    processedItems: r.processed_items,
+    successfulItems: r.successful_items,
+    failedItems: r.failed_items,
+    skippedItems: r.skipped_items,
+    retryOfOperationId: r.retry_of_operation_id,
+    startedAt: r.started_at,
+    completedAt: r.completed_at,
+    cancelRequestedAt: r.cancel_requested_at,
+    createdAt: r.created_at,
+    errorMessage: r.error_message,
+  };
+}
+
+const RESOURCE_TYPES: CleanupResourceType[] = ["onedrive_account", "sharepoint_site", "channel", "chat"];
+
+const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
+  onedrive_account: "OneDrive account",
+  sharepoint_site: "SharePoint site",
+  channel: "Teams channel",
+  chat: "Direct message",
+};
+
+/** GET /api/cleaning/cleanup/:operationId — progress, for the Cleanup Progress screen's polling. */
+cleaningRouter.get(
+  "/cleanup/:operationId",
+  asyncHandler(async (req, res) => {
+    await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
+
+    const opResult = await query<{
+      id: string; status: string; total_items: number; processed_items: number; successful_items: number;
+      failed_items: number; skipped_items: number; retry_of_operation_id: string | null;
+      started_at: string | null; completed_at: string | null; cancel_requested_at: string | null; created_at: string; error_message: string | null;
+    }>(`SELECT * FROM cleanup_operations WHERE id = $1`, [req.params.operationId]);
+    const op = opResult.rows[0];
+    if (!op) throw new ApiError(404, "CLEANUP_OPERATION_NOT_FOUND", "No such cleanup operation");
+
+    const byTypeResult = await query<{ resource_type: CleanupResourceType; status: string; count: string }>(
+      `SELECT resource_type, status, COUNT(*) AS count FROM cleanup_operation_items WHERE cleanup_operation_id = $1 GROUP BY resource_type, status`,
+      [req.params.operationId]
+    );
+    const byType = Object.fromEntries(
+      RESOURCE_TYPES.map((t) => [t, { total: 0, completed: 0, failed: 0, skipped: 0, unsupported: 0 }])
+    ) as CleanupProgress["byType"];
+    for (const r of byTypeResult.rows) {
+      const bucket = byType[r.resource_type];
+      const count = Number(r.count);
+      bucket.total += count;
+      if (r.status === "completed") bucket.completed += count;
+      else if (r.status === "failed") bucket.failed += count;
+      else if (r.status === "skipped") bucket.skipped += count;
+      else if (r.status === "unsupported") bucket.unsupported += count;
+    }
+
+    const filesResult = await query<{ files_total: string; files_completed: string }>(
+      `SELECT COALESCE(SUM(files_total), 0) AS files_total, COALESCE(SUM(files_completed), 0) AS files_completed
+       FROM cleanup_operation_items WHERE cleanup_operation_id = $1`,
+      [req.params.operationId]
+    );
+
+    const progress: CleanupProgress = {
+      ...toCleanupOperationRow(op),
+      byType,
+      filesTotal: Number(filesResult.rows[0]!.files_total),
+      filesCompleted: Number(filesResult.rows[0]!.files_completed),
+    };
+    res.json(progress);
+  })
+);
+
+/** GET /api/cleaning/cleanup/:operationId/recent-files — live "recently removed" feed for the progress screen. */
+cleaningRouter.get(
+  "/cleanup/:operationId/recent-files",
+  asyncHandler(async (req, res) => {
+    await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
+    const limit = Math.min(Math.max(1, Number(req.query.limit) || 10), 50);
+
+    const result = await query<{ file_name: string; resource_name: string; status: string; completed_at: string }>(
+      `SELECT cof.file_name, coi.display_name AS resource_name, cof.status, cof.completed_at
+       FROM cleanup_operation_item_files cof
+       JOIN cleanup_operation_items coi ON coi.id = cof.cleanup_operation_item_id
+       WHERE coi.cleanup_operation_id = $1 AND cof.completed_at IS NOT NULL
+       ORDER BY cof.completed_at DESC
+       LIMIT $2`,
+      [req.params.operationId, limit]
+    );
+
+    res.json({
+      files: result.rows.map((r) => ({
+        fileName: r.file_name,
+        resourceName: r.resource_name,
+        status: r.status as CleanupRecentFile["status"],
+        completedAt: r.completed_at,
+      })),
+    });
+  })
+);
+
+/** GET /api/cleaning/cleanup/:operationId/report — downloadable CSV: one row per file (plus one row per skipped/unsupported item, which has no files). */
+cleaningRouter.get(
+  "/cleanup/:operationId/report",
+  asyncHandler(async (req, res) => {
+    await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
+
+    const result = await query<{
+      resource_name: string; resource_type: CleanupResourceType; file_name: string | null;
+      status: string; completed_at: string | null; error_message: string | null;
+    }>(
+      `SELECT coi.display_name AS resource_name, coi.resource_type, cof.file_name,
+              COALESCE(cof.status, coi.status) AS status,
+              COALESCE(cof.completed_at, coi.completed_at) AS completed_at,
+              COALESCE(cof.error_message, coi.error_message) AS error_message
+       FROM cleanup_operation_items coi
+       LEFT JOIN cleanup_operation_item_files cof ON cof.cleanup_operation_item_id = coi.id
+       WHERE coi.cleanup_operation_id = $1
+       ORDER BY coi.display_name, cof.file_name NULLS FIRST`,
+      [req.params.operationId]
+    );
+
+    const csvEscape = (value: string) => `"${value.replace(/"/g, '""')}"`;
+    const header = ["Resource", "Type", "File", "Status", "Completed At", "Details"].map(csvEscape).join(",");
+    const rows = result.rows.map((r) =>
+      [
+        r.resource_name,
+        RESOURCE_TYPE_REPORT_LABEL[r.resource_type],
+        r.file_name ?? "",
+        r.status,
+        r.completed_at ?? "",
+        r.error_message ?? "",
+      ]
+        .map((v) => csvEscape(String(v)))
+        .join(",")
+    );
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="cleanup-report-${req.params.operationId}.csv"`);
+    res.send([header, ...rows].join("\r\n"));
+  })
+);
+
+/** GET /api/cleaning/cleanup/:operationId/items — paginated results table, optionally filtered by ?status=. */
+cleaningRouter.get(
+  "/cleanup/:operationId/items",
+  asyncHandler(async (req, res) => {
+    await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
+    const { page, pageSize } = parsePageQuery(req);
+    const statusFilter = typeof req.query.status === "string" ? req.query.status : null;
+    const statusClause = `($2::text IS NULL OR status = $2)`;
+
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*) FROM cleanup_operation_items WHERE cleanup_operation_id = $1 AND ${statusClause}`,
+      [req.params.operationId, statusFilter]
+    );
+    const result = await query<{
+      id: string; connection_id: string; resource_type: CleanupResourceType; display_name: string; status: string;
+      attempts: number; started_at: string | null; completed_at: string | null; error_code: string | null; error_message: string | null;
+    }>(
+      `SELECT id, connection_id, resource_type, display_name, status, attempts, started_at, completed_at, error_code, error_message
+       FROM cleanup_operation_items
+       WHERE cleanup_operation_id = $1 AND ${statusClause}
+       ORDER BY display_name, id
+       LIMIT $3 OFFSET $4`,
+      [req.params.operationId, statusFilter, pageSize, (page - 1) * pageSize]
+    );
+
+    const items: CleanupOperationItemRow[] = result.rows.map((r) => ({
+      id: r.id,
+      connectionId: r.connection_id,
+      resourceType: r.resource_type,
+      displayName: r.display_name,
+      status: r.status as CleanupOperationItemRow["status"],
+      attempts: r.attempts,
+      startedAt: r.started_at,
+      completedAt: r.completed_at,
+      errorCode: r.error_code,
+      errorMessage: r.error_message,
+    }));
+    res.json({ items, total: Number(countResult.rows[0]!.count), page, pageSize });
+  })
+);
+
+/** POST /api/cleaning/cleanup/:operationId/cancel — cooperative: the worker checks cancel_requested_at between items. */
+cleaningRouter.post(
+  "/cleanup/:operationId/cancel",
+  asyncHandler(async (req, res) => {
+    await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "cleanup_admin");
+
+    const result = await query<{ status: CleanupOperationStatus }>(`SELECT status FROM cleanup_operations WHERE id = $1`, [req.params.operationId]);
+    const status = result.rows[0]?.status;
+    if (!status || (status !== "queued" && status !== "running")) {
+      throw new ApiError(409, "CLEANUP_NOT_CANCELLABLE", "This cleanup has already finished");
+    }
+
+    await query(`UPDATE cleanup_operations SET cancel_requested_at = now() WHERE id = $1`, [req.params.operationId]);
+    res.status(202).json({ status: "cancel_requested" });
+  })
+);
+
+/** POST /api/cleaning/cleanup/:operationId/retry — creates a NEW operation scoped to only the previous failed items; the original operation's rows are never mutated. */
+cleaningRouter.post(
+  "/cleanup/:operationId/retry",
+  asyncHandler(async (req, res) => {
+    const { tenantId } = await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "cleanup_admin");
+
+    const opResult = await query<{ status: CleanupOperationStatus }>(`SELECT status FROM cleanup_operations WHERE id = $1`, [req.params.operationId]);
+    const status = opResult.rows[0]?.status;
+    if (!status || (status !== "completed_with_errors" && status !== "failed")) {
+      throw new ApiError(409, "NOTHING_TO_RETRY", "This cleanup has no failed items to retry");
+    }
+
+    const running = await query(`SELECT 1 FROM cleanup_operations WHERE tenant_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [tenantId]);
+    if (running.rows.length > 0) {
+      throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
+    }
+
+    const failedItems = await query<{
+      connection_id: string; resource_type: CleanupResourceType; resource_id: string; display_name: string; graph_ref: Record<string, string>;
+    }>(`SELECT connection_id, resource_type, resource_id, display_name, graph_ref FROM cleanup_operation_items WHERE cleanup_operation_id = $1 AND status = 'failed'`, [
+      req.params.operationId,
+    ]);
+    if (failedItems.rows.length === 0) {
+      throw new ApiError(409, "NOTHING_TO_RETRY", "This cleanup has no failed items to retry");
+    }
+
+    const newOperationId = await withTransaction(async (client) => {
+      const opInsert = await client.query<{ id: string }>(
+        `INSERT INTO cleanup_operations (tenant_id, requested_by, total_items, retry_of_operation_id) VALUES ($1, $2, $3, $4) RETURNING id`,
+        [tenantId, req.session!.operatorId, failedItems.rows.length, req.params.operationId]
+      );
+      const newId = opInsert.rows[0]!.id;
+      for (const item of failedItems.rows) {
+        await client.query(
+          `INSERT INTO cleanup_operation_items (cleanup_operation_id, connection_id, resource_type, resource_id, display_name, graph_ref, status)
+           VALUES ($1, $2, $3, $4, $5, $6, 'pending')`,
+          [newId, item.connection_id, item.resource_type, item.resource_id, item.display_name, JSON.stringify(item.graph_ref)]
+        );
+      }
+      return newId;
+    });
+
+    await enqueueCleanupExecutionJob({ operationId: newOperationId });
+    res.status(202).json({ operationId: newOperationId, status: "queued" });
   })
 );

@@ -9,3 +9,19 @@ export async function query<T extends pg.QueryResultRow = pg.QueryResultRow>(
 ): Promise<pg.QueryResult<T>> {
   return pool.query<T>(text, params);
 }
+
+/** Runs `fn` inside BEGIN/COMMIT, rolling back on any thrown error. Used where multiple writes must land atomically (e.g. creating a cleanup operation and all its items together). */
+export async function withTransaction<T>(fn: (client: pg.PoolClient) => Promise<T>): Promise<T> {
+  const client = await pool.connect();
+  try {
+    await client.query("BEGIN");
+    const result = await fn(client);
+    await client.query("COMMIT");
+    return result;
+  } catch (err) {
+    await client.query("ROLLBACK");
+    throw err;
+  } finally {
+    client.release();
+  }
+}

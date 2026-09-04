@@ -92,6 +92,16 @@ cleanupRouter.post(
       throw new ApiError(400, "CONFIRMATION_MISMATCH", 'Typed confirmation must exactly equal "DELETE"');
     }
 
+    // The Cleaning module's connections-based cleanup (routes/cleaning.ts) is a separate pipeline
+    // against the same tenant — without this check the two could run concurrent, overlapping Graph
+    // deletes and corrupt each other's audit trail.
+    const runningNewCleanup = await query(`SELECT 1 FROM cleanup_operations WHERE tenant_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [
+      tenantId,
+    ]);
+    if (runningNewCleanup.rows.length > 0) {
+      throw new ApiError(409, "CLEANUP_ALREADY_RUNNING", "A cleanup is already in progress for this Microsoft 365 connection");
+    }
+
     const previewRow = await query<{ scope: PreviewScope; expires_at: string }>(
       `SELECT scope, expires_at FROM previews WHERE id = $1 AND tenant_id = $2`,
       [body.previewId, tenantId]

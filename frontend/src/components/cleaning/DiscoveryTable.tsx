@@ -6,8 +6,8 @@ export interface DiscoveryColumn<T> {
   render: (row: T) => React.ReactNode;
 }
 
-/** "Showing page X of Y" + a direct page-jump dropdown — no Prev/Next buttons needed at this scale. */
-function PageFooter({ page, totalPages, total, onGoToPage, disabled }: { page: number; totalPages: number; total: number; onGoToPage: (page: number) => void; disabled: boolean }) {
+/** "Showing page X of Y" + a direct page-jump dropdown — no Prev/Next buttons needed at this scale. Exported for reuse by the Cleanup Results table, which shares the same footer but isn't a selection table. */
+export function PageFooter({ page, totalPages, total, onGoToPage, disabled }: { page: number; totalPages: number; total: number; onGoToPage: (page: number) => void; disabled: boolean }) {
   return (
     <div className="flex flex-wrap items-center justify-between gap-3 border-t border-slate-100 bg-slate-50/60 px-4 py-2.5 text-sm text-slate-500">
       <span>{total.toLocaleString()} total</span>
