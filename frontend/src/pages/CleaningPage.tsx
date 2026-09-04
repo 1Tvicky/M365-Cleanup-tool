@@ -12,6 +12,7 @@ import {
   type CleaningConnectionRow,
   type CleaningResourceRow,
   type CleaningTeamsSummary,
+  type PageResult,
 } from "../api/cleaning";
 import { ApiClientError } from "../api/client";
 import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../components/cleaning/DiscoveryTable";
@@ -125,8 +126,10 @@ export function CleaningPage() {
     return <ReviewPage totals={totals} onBack={() => setView("dashboard")} />;
   }
 
+  const showSelectionBar = view !== "landing" && hasSelection(totals);
+
   return (
-    <div className="px-8 py-6 pb-0">
+    <div className={`px-8 py-6 ${showSelectionBar ? "pb-24" : ""}`}>
       <div className="pb-6">
         {view !== "landing" && (
           <button
@@ -171,11 +174,7 @@ export function CleaningPage() {
         )}
       </div>
 
-      {view !== "landing" && hasSelection(totals) && (
-        <div className="sticky bottom-0 -mx-8">
-          <SelectionSummary totals={totals} onReview={() => setView("review")} />
-        </div>
-      )}
+      {showSelectionBar && <SelectionSummary totals={totals} onReview={() => setView("review")} />}
     </div>
   );
 }
@@ -246,15 +245,16 @@ function Dashboard({ group, onOpenOneDrive, onOpenSharePoint, onOpenTeams }: { g
 
   useEffect(() => {
     if (group.onedrive) {
-      listOneDriveAccounts(group.onedrive.id, { sort: "storage" }).then(({ accounts, nextCursor }) => {
-        // A single page is enough for the dashboard's "Accounts / Storage Used" headline — the
-        // full table (with real pagination) is what "View Accounts" opens.
-        setOneDriveTotals({ count: accounts.length + (nextCursor ? 1 : 0), bytes: accounts.reduce((s, a) => s + a.storageUsedBytes, 0) });
+      listOneDriveAccounts(group.onedrive.id, { sort: "storage", pageSize: 200 }).then(({ accounts, total }) => {
+        // `total` is the accurate count; the byte sum is over the (large) page fetched here, which
+        // covers the dashboard headline for realistically-sized tenants — the full table (with real
+        // pagination) is what "View Accounts" opens.
+        setOneDriveTotals({ count: total, bytes: accounts.reduce((s, a) => s + a.storageUsedBytes, 0) });
       });
     }
     if (group.sharepoint) {
-      listSharePointSites(group.sharepoint.id, { sort: "storage" }).then(({ sites }) => {
-        setSharePointTotals({ count: sites.length, bytes: sites.reduce((s, a) => s + a.storageUsedBytes, 0) });
+      listSharePointSites(group.sharepoint.id, { sort: "storage", pageSize: 200 }).then(({ sites, total }) => {
+        setSharePointTotals({ count: total, bytes: sites.reduce((s, a) => s + a.storageUsedBytes, 0) });
       });
     }
   }, [group]);
@@ -359,38 +359,31 @@ function Dashboard({ group, onOpenOneDrive, onOpenSharePoint, onOpenTeams }: { g
  * cached by page index, so Previous is instant (no re-fetch) and only Next past the last-seen page
  * hits the network. Search/sort changes reset everything back to page 1.
  */
+const PAGE_SIZE = 20;
+
 function usePagedList<T extends { id: string }>(
-  fetcher: (opts: { search?: string; sort?: "storage" | "name"; cursor?: string | null }) => Promise<{ rows: T[]; nextCursor: string | null }>,
+  fetcher: (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) => Promise<{ rows: T[] } & PageResult<T>>,
   search: string,
   sort?: "storage" | "name"
 ) {
-  const [pageIndex, setPageIndex] = useState(0);
-  // pages[i] = rows shown on page i (0-based); cursors[i] = the cursor used to FETCH page i+1 (i.e. nextCursor returned by page i).
-  const [pages, setPages] = useState<T[][]>([]);
-  const [cursors, setCursors] = useState<(string | null)[]>([null]);
+  const [page, setPage] = useState(1);
+  const [rows, setRows] = useState<T[]>([]);
+  const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const debouncedSearch = useDebouncedValue(search, 300);
   const requestId = useRef(0);
 
-  const fetchPage = useCallback(
-    (index: number, cursor: string | null) => {
+  const load = useCallback(
+    (targetPage: number) => {
       const id = ++requestId.current;
       setLoading(true);
       setError(null);
-      fetcher({ search: debouncedSearch, sort, cursor })
-        .then(({ rows: r, nextCursor }) => {
+      fetcher({ search: debouncedSearch, sort, page: targetPage, pageSize: PAGE_SIZE })
+        .then((res) => {
           if (id !== requestId.current) return;
-          setPages((prev) => {
-            const next = [...prev];
-            next[index] = r;
-            return next;
-          });
-          setCursors((prev) => {
-            const next = [...prev];
-            next[index + 1] = nextCursor;
-            return next;
-          });
+          setRows(res.rows);
+          setTotal(res.total);
         })
         .catch((err) => {
           if (id !== requestId.current) return;
@@ -405,33 +398,23 @@ function usePagedList<T extends { id: string }>(
 
   // Search/sort changed — start over from page 1.
   useEffect(() => {
-    setPageIndex(0);
-    setPages([]);
-    setCursors([null]);
-    fetchPage(0, null);
+    setPage(1);
+    load(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [debouncedSearch, sort]);
 
-  const goNext = useCallback(() => {
-    const nextIndex = pageIndex + 1;
-    setPageIndex(nextIndex);
-    if (!pages[nextIndex]) fetchPage(nextIndex, cursors[nextIndex] ?? null);
-  }, [pageIndex, pages, cursors, fetchPage]);
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
-  const goPrevious = useCallback(() => {
-    setPageIndex((i) => Math.max(0, i - 1));
-  }, []);
+  const goToPage = useCallback(
+    (target: number) => {
+      const clamped = Math.min(Math.max(1, target), totalPages);
+      setPage(clamped);
+      load(clamped);
+    },
+    [totalPages, load]
+  );
 
-  return {
-    rows: pages[pageIndex] ?? [],
-    loading,
-    error,
-    pageNumber: pageIndex + 1,
-    hasNext: cursors[pageIndex + 1] !== undefined && cursors[pageIndex + 1] !== null,
-    hasPrevious: pageIndex > 0,
-    goNext,
-    goPrevious,
-  };
+  return { rows, loading, error, page, totalPages, total, goToPage };
 }
 
 function toggleInMap<T>(map: Map<string, T>, setMap: (m: Map<string, T>) => void, id: string, row: T) {
@@ -444,11 +427,11 @@ function OneDriveView({ connectionId, selected, setSelected }: { connectionId: s
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"storage" | "name">("storage");
   const fetcher = useCallback(
-    (opts: { search?: string; sort?: "storage" | "name"; cursor?: string | null }) =>
-      listOneDriveAccounts(connectionId, opts).then((r) => ({ rows: r.accounts, nextCursor: r.nextCursor })),
+    (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) =>
+      listOneDriveAccounts(connectionId, opts).then((r) => ({ rows: r.accounts, total: r.total, page: r.page, pageSize: r.pageSize })),
     [connectionId]
   );
-  const { rows, loading, error, pageNumber, hasNext, hasPrevious, goNext, goPrevious } = usePagedList(fetcher, search, sort);
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search, sort);
 
   const columns: DiscoveryColumn<CleaningResourceRow>[] = [
     { label: "User Name", render: (r) => r.name },
@@ -467,11 +450,10 @@ function OneDriveView({ connectionId, selected, setSelected }: { connectionId: s
         rows={rows}
         loading={loading}
         error={error}
-        pageNumber={pageNumber}
-        hasNext={hasNext}
-        hasPrevious={hasPrevious}
-        onNext={goNext}
-        onPrevious={goPrevious}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
         search={search}
         onSearchChange={setSearch}
         searchPlaceholder="Search users…"
@@ -499,11 +481,11 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"storage" | "name">("storage");
   const fetcher = useCallback(
-    (opts: { search?: string; sort?: "storage" | "name"; cursor?: string | null }) =>
-      listSharePointSites(connectionId, opts).then((r) => ({ rows: r.sites, nextCursor: r.nextCursor })),
+    (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) =>
+      listSharePointSites(connectionId, opts).then((r) => ({ rows: r.sites, total: r.total, page: r.page, pageSize: r.pageSize })),
     [connectionId]
   );
-  const { rows, loading, error, pageNumber, hasNext, hasPrevious, goNext, goPrevious } = usePagedList(fetcher, search, sort);
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search, sort);
 
   const columns: DiscoveryColumn<CleaningResourceRow>[] = [
     { label: "Site Name", render: (r) => r.name },
@@ -522,11 +504,10 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
         rows={rows}
         loading={loading}
         error={error}
-        pageNumber={pageNumber}
-        hasNext={hasNext}
-        hasPrevious={hasPrevious}
-        onNext={goNext}
-        onPrevious={goPrevious}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
         search={search}
         onSearchChange={setSearch}
         searchPlaceholder="Search sites…"
@@ -569,7 +550,6 @@ function TeamsView({
 }) {
   const [search, setSearch] = useState("");
   const [channels, setChannels] = useState<CleaningChannelRow[]>([]);
-  const [chats, setChats] = useState<CleaningChatRow[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<CleaningTeamsSummary | null>(null);
@@ -578,13 +558,8 @@ function TeamsView({
 
   const refresh = useCallback(async () => {
     try {
-      const [{ channels: ch }, { chats: dm }, s] = await Promise.all([
-        listTeamsChannels(connectionId, { search: debouncedSearch }),
-        listTeamsDMs(connectionId),
-        getTeamsSummary(connectionId),
-      ]);
+      const [{ channels: ch }, s] = await Promise.all([listTeamsChannels(connectionId, { search: debouncedSearch }), getTeamsSummary(connectionId)]);
       setChannels(ch);
-      setChats(dm);
       setSummary(s);
     } catch (err) {
       setError(err instanceof ApiClientError ? err.message : "Couldn't load Teams data. Try again.");
@@ -596,6 +571,13 @@ function TeamsView({
   useEffect(() => {
     refresh();
   }, [refresh]);
+
+  const dmsFetcher = useCallback(
+    (opts: { search?: string; page?: number; pageSize?: number }) =>
+      listTeamsDMs(connectionId, opts).then((r) => ({ rows: r.chats, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const dms = usePagedList(dmsFetcher, search);
 
   // While discovery or message-count calculation is running, keep polling so channels/counts fill
   // in live instead of requiring a manual refresh.
@@ -618,12 +600,6 @@ function TeamsView({
       setRequestingCounts(false);
     }
   }
-
-  const filteredChats = chats.filter((c) => {
-    if (!debouncedSearch) return true;
-    const names = c.participants.map((p) => p.displayName ?? p.upn ?? "").join(" ").toLowerCase();
-    return names.includes(debouncedSearch.toLowerCase());
-  });
 
   const columns: DiscoveryColumn<CleaningChatRow>[] = [
     {
@@ -709,26 +685,25 @@ function TeamsView({
         <DiscoveryTable
           title="Direct Messages"
           columns={columns}
-          rows={filteredChats}
-          loading={loading}
-          error={error}
-          pageNumber={1}
-          hasNext={false}
-          hasPrevious={false}
-          onNext={() => {}}
-          onPrevious={() => {}}
+          rows={dms.rows}
+          loading={dms.loading}
+          error={dms.error}
+          page={dms.page}
+          totalPages={dms.totalPages}
+          total={dms.total}
+          onGoToPage={dms.goToPage}
           search={search}
           onSearchChange={setSearch}
           searchPlaceholder="Search conversations…"
           selected={new Set(selectedChats.keys())}
           onToggle={(id) => {
-            const row = chats.find((c) => c.id === id);
+            const row = dms.rows.find((c) => c.id === id);
             if (row) toggleInMap(selectedChats, setSelectedChats, id, row);
           }}
           onToggleAll={() => {
-            const allSelected = filteredChats.every((r) => selectedChats.has(r.id));
+            const allSelected = dms.rows.every((r) => selectedChats.has(r.id));
             const next = new Map(selectedChats);
-            for (const r of filteredChats) allSelected ? next.delete(r.id) : next.set(r.id, r);
+            for (const r of dms.rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
             setSelectedChats(next);
           }}
           emptyMessage="No direct message conversations found."

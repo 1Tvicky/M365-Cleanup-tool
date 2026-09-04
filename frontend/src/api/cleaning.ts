@@ -67,26 +67,33 @@ export function listCleaningConnections(): Promise<{ connections: CleaningConnec
   return rawFetch("/api/cleaning/connections");
 }
 
+export interface PageResult<T> {
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 interface ListOpts {
   search?: string;
   sort?: "storage" | "name";
-  cursor?: string | null;
+  page?: number;
+  pageSize?: number;
 }
 
 function toQuery(opts: ListOpts): string {
   const params = new URLSearchParams();
   if (opts.search) params.set("search", opts.search);
   if (opts.sort) params.set("sort", opts.sort);
-  if (opts.cursor) params.set("cursor", opts.cursor);
-  params.set("limit", "50");
+  params.set("page", String(opts.page ?? 1));
+  params.set("pageSize", String(opts.pageSize ?? 20));
   return params.toString();
 }
 
-export function listOneDriveAccounts(connectionId: string, opts: ListOpts = {}): Promise<{ accounts: CleaningResourceRow[]; nextCursor: string | null }> {
+export function listOneDriveAccounts(connectionId: string, opts: ListOpts = {}): Promise<{ accounts: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/onedrive?${toQuery(opts)}`);
 }
 
-export function listSharePointSites(connectionId: string, opts: ListOpts = {}): Promise<{ sites: CleaningResourceRow[]; nextCursor: string | null }> {
+export function listSharePointSites(connectionId: string, opts: ListOpts = {}): Promise<{ sites: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/sharepoint?${toQuery(opts)}`);
 }
 
@@ -94,11 +101,11 @@ export function getTeamsSummary(connectionId: string): Promise<CleaningTeamsSumm
   return rawFetch(`/api/cleaning/connections/${connectionId}/teams/summary`);
 }
 
-export function listTeamsChannels(connectionId: string, opts: ListOpts = {}): Promise<{ channels: CleaningChannelRow[]; nextCursor: string | null }> {
+export function listTeamsChannels(connectionId: string, opts: ListOpts = {}): Promise<{ channels: CleaningChannelRow[] } & PageResult<CleaningChannelRow>> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/teams/channels?${toQuery(opts)}`);
 }
 
-export function listTeamsDMs(connectionId: string, opts: ListOpts = {}): Promise<{ chats: CleaningChatRow[]; nextCursor: string | null }> {
+export function listTeamsDMs(connectionId: string, opts: ListOpts = {}): Promise<{ chats: CleaningChatRow[] } & PageResult<CleaningChatRow>> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/teams/dms?${toQuery(opts)}`);
 }
 

@@ -101,33 +101,39 @@ cleaningRouter.get(
 );
 
 /**
- * Keyset pagination must key off the actual ORDER BY columns, not an unrelated id — a UUID primary
- * key has no relationship to storage-size or name order, so filtering by "id > lastId" while
- * sorting by storage/name lets the same top rows reappear on "page 2" instead of continuing where
- * page 1 left off. The cursor therefore encodes the last row's (sort value, id) pair, not just id.
+ * Page-number pagination (OFFSET/LIMIT + a total count) rather than keyset/cursor — the UI needs
+ * to jump directly to an arbitrary page ("Go to: [3]"), which a forward-only cursor can't do.
+ * These tables top out at a few thousand rows (connection_users, cleaning_channels/chats), so the
+ * O(offset) cost of OFFSET is not a real concern at this scale.
  */
-interface ResourceCursor {
-  id: string;
-  storage?: number;
-  name?: string;
+interface PageResult<T> {
+  rows: T[];
+  total: number;
+  page: number;
+  pageSize: number;
 }
 
-function encodeCursor(c: ResourceCursor): string {
-  return Buffer.from(JSON.stringify(c)).toString("base64url");
-}
-
-function decodeCursor(cursor: string | null): ResourceCursor | null {
-  if (!cursor) return null;
-  try {
-    return JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
-  } catch {
-    return null; // a garbled/foreign cursor just restarts from the top rather than 500ing
-  }
+function parsePageQuery(req: { query: Record<string, unknown> }) {
+  const search = typeof req.query.search === "string" && req.query.search.trim() ? req.query.search.trim() : null;
+  const sort: "name" | "storage" = req.query.sort === "name" ? "name" : "storage";
+  const page = Math.max(1, Number(req.query.page) || 1);
+  const pageSize = Math.min(Math.max(1, Number(req.query.pageSize) || 20), 200);
+  return { search, sort, page, pageSize };
 }
 
 /** Shared by OneDrive and SharePoint — both read connection_users directly, no Graph calls, no job. */
-async function listCleaningResources(connectionId: string, opts: { search: string | null; sort: "storage" | "name"; cursor: string | null; limit: number }) {
-  const cursor = decodeCursor(opts.cursor);
+async function listCleaningResources(
+  connectionId: string,
+  opts: { search: string | null; sort: "storage" | "name"; page: number; pageSize: number }
+): Promise<PageResult<CleaningResourceRow>> {
+  const searchClause = `($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')`;
+
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) FROM connection_users WHERE connection_id = $1 AND ${searchClause}`,
+    [connectionId, opts.search]
+  );
+  const total = Number(countResult.rows[0]!.count);
+
   const result = await query<{
     id: string;
     display_name: string | null;
@@ -138,18 +144,10 @@ async function listCleaningResources(connectionId: string, opts: { search: strin
   }>(
     `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status
      FROM connection_users
-     WHERE connection_id = $1
-       AND ($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')
-       AND (
-         $3::uuid IS NULL OR
-         CASE WHEN $6 = 'storage'
-           THEN (storage_used_bytes < $4::bigint) OR (storage_used_bytes = $4::bigint AND id > $3::uuid)
-           ELSE (COALESCE(display_name, upn) > $5::text) OR (COALESCE(display_name, upn) = $5::text AND id > $3::uuid)
-         END
-       )
+     WHERE connection_id = $1 AND ${searchClause}
      ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
-     LIMIT $7`,
-    [connectionId, opts.search, cursor?.id ?? null, cursor?.storage ?? null, cursor?.name ?? null, opts.sort, opts.limit]
+     LIMIT $3 OFFSET $4`,
+    [connectionId, opts.search, opts.pageSize, (opts.page - 1) * opts.pageSize]
   );
 
   const rows: CleaningResourceRow[] = result.rows.map((r) => ({
@@ -161,20 +159,7 @@ async function listCleaningResources(connectionId: string, opts: { search: strin
     status: r.sync_status as CleaningResourceRow["status"],
   }));
 
-  const last = result.rows[result.rows.length - 1];
-  const nextCursor =
-    rows.length === opts.limit && last
-      ? encodeCursor({ id: last.id, storage: Number(last.storage_used_bytes), name: last.display_name ?? last.upn })
-      : null;
-  return { rows, nextCursor };
-}
-
-function parseListQuery(req: { query: Record<string, unknown> }) {
-  const search = typeof req.query.search === "string" && req.query.search.trim() ? req.query.search.trim() : null;
-  const sort: "name" | "storage" = req.query.sort === "name" ? "name" : "storage";
-  const cursor = typeof req.query.cursor === "string" ? req.query.cursor : null;
-  const limit = Math.min(Number(req.query.limit) || 50, 200);
-  return { search, sort, cursor, limit };
+  return { rows, total, page: opts.page, pageSize: opts.pageSize };
 }
 
 /** GET /api/cleaning/connections/:id/onedrive — OneDrive Accounts table. */
@@ -183,8 +168,8 @@ cleaningRouter.get(
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId);
     await resolveConnection(req.params.id!, "onedrive");
-    const { rows, nextCursor } = await listCleaningResources(req.params.id!, parseListQuery(req));
-    res.json({ accounts: rows, nextCursor });
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
+    res.json({ accounts: rows, total, page, pageSize });
   })
 );
 
@@ -194,8 +179,8 @@ cleaningRouter.get(
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId);
     await resolveConnection(req.params.id!, "sharepoint");
-    const { rows, nextCursor } = await listCleaningResources(req.params.id!, parseListQuery(req));
-    res.json({ sites: rows, nextCursor });
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
+    res.json({ sites: rows, total, page, pageSize });
   })
 );
 
@@ -289,13 +274,24 @@ cleaningRouter.get(
   })
 );
 
-/** GET /api/cleaning/connections/:id/teams/channels — flat rows; frontend groups by teamId. */
+/**
+ * GET /api/cleaning/connections/:id/teams/channels — flat rows; frontend groups by teamId into a
+ * tree, which isn't paginated in the UI yet, so this just asks for a generous page size rather
+ * than implementing a pager for a view that doesn't have one — still offset-based for consistency
+ * and so a future paginated tree view doesn't need an API change.
+ */
 cleaningRouter.get(
   "/connections/:id/teams/channels",
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId);
     await resolveConnection(req.params.id!, "teams");
-    const { search, cursor, limit } = parseListQuery(req);
+    const { search, page, pageSize } = parsePageQuery(req);
+    const searchClause = `($2::text IS NULL OR team_name ILIKE '%' || $2 || '%' OR channel_name ILIKE '%' || $2 || '%')`;
+
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*) FROM cleaning_channels WHERE connection_id = $1 AND ${searchClause}`,
+      [req.params.id, search]
+    );
 
     const result = await query<{
       id: string; team_id: string; team_name: string; channel_id: string; channel_name: string;
@@ -303,12 +299,10 @@ cleaningRouter.get(
     }>(
       `SELECT id, team_id, team_name, channel_id, channel_name, message_count, count_status
        FROM cleaning_channels
-       WHERE connection_id = $1
-         AND ($2::text IS NULL OR team_name ILIKE '%' || $2 || '%' OR channel_name ILIKE '%' || $2 || '%')
-         AND ($3::uuid IS NULL OR id > $3)
+       WHERE connection_id = $1 AND ${searchClause}
        ORDER BY team_name, channel_name, id
-       LIMIT $4`,
-      [req.params.id, search, cursor, limit]
+       LIMIT $3 OFFSET $4`,
+      [req.params.id, search, pageSize, (page - 1) * pageSize]
     );
 
     const channels: CleaningChannelRow[] = result.rows.map((r) => ({
@@ -320,7 +314,7 @@ cleaningRouter.get(
       messageCount: r.message_count,
       countStatus: r.count_status as CleaningChannelRow["countStatus"],
     }));
-    res.json({ channels, nextCursor: channels.length === limit ? channels[channels.length - 1]!.id : null });
+    res.json({ channels, total: Number(countResult.rows[0]!.count), page, pageSize });
   })
 );
 
@@ -330,7 +324,13 @@ cleaningRouter.get(
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId);
     await resolveConnection(req.params.id!, "teams");
-    const { cursor, limit } = parseListQuery(req);
+    const { search, page, pageSize } = parsePageQuery(req);
+    const searchClause = `($2::text IS NULL OR participants::text ILIKE '%' || $2 || '%')`;
+
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*) FROM cleaning_chats WHERE connection_id = $1 AND ${searchClause}`,
+      [req.params.id, search]
+    );
 
     const result = await query<{
       id: string; chat_type: string; participants: { displayName: string | null; upn: string | null }[];
@@ -338,10 +338,10 @@ cleaningRouter.get(
     }>(
       `SELECT id, chat_type, participants, message_count, count_status, last_message_at
        FROM cleaning_chats
-       WHERE connection_id = $1 AND ($2::uuid IS NULL OR id > $2)
+       WHERE connection_id = $1 AND ${searchClause}
        ORDER BY last_message_at DESC NULLS LAST, id
-       LIMIT $3`,
-      [req.params.id, cursor, limit]
+       LIMIT $3 OFFSET $4`,
+      [req.params.id, search, pageSize, (page - 1) * pageSize]
     );
 
     const chats: CleaningChatRow[] = result.rows.map((r) => ({
@@ -352,7 +352,7 @@ cleaningRouter.get(
       countStatus: r.count_status as CleaningChatRow["countStatus"],
       lastMessageAt: r.last_message_at,
     }));
-    res.json({ chats, nextCursor: chats.length === limit ? chats[chats.length - 1]!.id : null });
+    res.json({ chats, total: Number(countResult.rows[0]!.count), page, pageSize });
   })
 );
 

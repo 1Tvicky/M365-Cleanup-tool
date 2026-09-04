@@ -39,7 +39,11 @@ export function SelectionSummary({ totals, onReview }: { totals: SelectionTotals
     parts.push(`${totals.dms.toLocaleString()} conversation${totals.dms === 1 ? "" : "s"} · ${messagesFragment(totals.dms, totals.dmsWithKnownCount, totals.dmMessages)}`);
 
   return (
-    <div className="sticky bottom-0 left-0 right-0 z-10 border-t border-slate-200 bg-white px-8 py-4 shadow-[0_-4px_12px_rgba(0,0,0,0.04)]">
+    // Fixed to the viewport, not sticky within the page's own scroll flow — a long discovery list
+    // (found via testing: 50 rows per page) meant `sticky` only caught up once you'd scrolled all
+    // the way to the bottom of the content, which defeats the point of an always-visible summary.
+    // left-20 clears the sidebar's fixed w-20 width (see components/layout/SideNav.tsx).
+    <div className="fixed bottom-0 left-20 right-0 z-20 border-t border-slate-200 bg-white px-8 py-4 shadow-[0_-4px_12px_rgba(0,0,0,0.08)]">
       <div className="flex flex-wrap items-center justify-between gap-4">
         <div>
           <div className="text-xs font-semibold uppercase tracking-wide text-slate-400">Selected</div>
