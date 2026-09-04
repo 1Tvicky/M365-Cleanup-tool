@@ -404,6 +404,44 @@ function syncResourceLabel(
   return "✗"; // genuinely 'failed' or 'cancelled' — the sync job itself didn't complete
 }
 
+const DISCOVERING_LABEL: Record<"onedrive" | "sharepoint" | "teams", string> = {
+  onedrive: "Finding accounts…",
+  sharepoint: "Finding sites…",
+  teams: "Finding teams…",
+};
+
+/**
+ * Visual progress bar for an in-flight sync — determinate (fills to processed/total) once the
+ * backend has finished enumerating and knows a real total; an animated indeterminate sweep before
+ * that, so a large tenant's enumeration phase (which can itself take a while) doesn't look stalled.
+ */
+function SyncProgressBar({ total, processed }: { total: number; processed: number }) {
+  if (total <= 0) {
+    return (
+      <div className="relative h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+        <div className="absolute inset-y-0 w-1/3 animate-indeterminate-bar rounded-full bg-[#1b2fc4]" />
+      </div>
+    );
+  }
+  const pct = Math.min(100, Math.round((processed / total) * 100));
+  return (
+    <div className="h-1.5 w-full overflow-hidden rounded-full bg-slate-100">
+      <div className="h-full rounded-full bg-[#1b2fc4] transition-[width] duration-500 ease-out" style={{ width: `${pct}%` }} />
+    </div>
+  );
+}
+
+/** A rough "N minutes left" from the rate observed so far — never shown until there's at least one completed item to base a rate on, so it's never just a guess dressed up as a number. */
+function estimateSyncTimeRemaining(startedAt: string, processed: number, total: number): string | null {
+  if (processed <= 0 || total <= 0 || processed >= total) return null;
+  const elapsedMs = Date.now() - new Date(startedAt).getTime();
+  if (elapsedMs <= 0) return null;
+  const remainingMs = (elapsedMs / processed) * (total - processed);
+  const remainingMin = Math.round(remainingMs / 60_000);
+  if (remainingMin < 1) return "less than a minute left";
+  return remainingMin === 1 ? "about 1 minute left" : `about ${remainingMin} minutes left`;
+}
+
 /**
  * Self-contained per-cloud sync control — each of OneDrive/SharePoint/Teams gets its own instance,
  * its own "Last synced" timestamp, and its own independent Sync button, so syncing one never blocks
@@ -457,7 +495,9 @@ function CloudSyncControl({
       if (cancelled || !op) return;
       setSyncOperation(op);
       if (op.status === "queued" || op.status === "running") {
-        timer = setTimeout(poll, 3000);
+        // Faster than the old 3s cadence — this drives a live progress bar now, not just a static
+        // "Syncing…" label, so it should feel like it's actually moving.
+        timer = setTimeout(poll, 1500);
       } else {
         onSyncFinished();
       }
@@ -496,7 +536,21 @@ function CloudSyncControl({
           {isSyncing ? "Syncing…" : "Sync"}
         </button>
       </div>
-      {isSyncing && resourceStatus && <p className="mt-1 text-xs text-slate-500">{syncResourceLabel(resourceStatus)}</p>}
+      {isSyncing && (
+        <div className="mt-2">
+          <SyncProgressBar total={resourceStatus?.total ?? 0} processed={resourceStatus?.processed ?? 0} />
+          <div className="mt-1 flex items-center justify-between gap-2 text-xs text-slate-500">
+            <span>
+              {resourceStatus && resourceStatus.total > 0
+                ? `Syncing ${resourceStatus.processed.toLocaleString()} / ${resourceStatus.total.toLocaleString()}`
+                : DISCOVERING_LABEL[cloudType]}
+            </span>
+            {resourceStatus && resourceStatus.total > 0 && syncOperation && (
+              <span className="shrink-0">{estimateSyncTimeRemaining(syncOperation.startedAt, resourceStatus.processed, resourceStatus.total)}</span>
+            )}
+          </div>
+        </div>
+      )}
       {!isSyncing && resourceStatus && <p className={`mt-1 text-xs ${finishedClassName}`}>{syncResourceLabel(resourceStatus)}</p>}
       {syncError && <p className="mt-1 text-xs text-rose-600">{syncError}</p>}
     </div>

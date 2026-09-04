@@ -87,6 +87,11 @@ async function syncOneDrive(client: Awaited<ReturnType<typeof graphClientForTena
   let failed = 0;
   await runThrottled(users, (user) => getUserDriveQuota(client, user.id), {
     isCancelled: () => isCancelled(syncJobId),
+    // A single-object drive-quota GET is one of the lightest calls this app makes to Graph, and
+    // unlike Teams chat listing it isn't known to be throttled more aggressively tenant-wide — doubling
+    // the default concurrency roughly halves wall-clock time for large tenants (hundreds of accounts).
+    // Safe to raise further if 429s stay rare; the existing Retry-After backoff absorbs it either way.
+    batchSize: 40,
     onItemSettled: async (user, result) => {
       // A user with no OneDrive provisioned (getUserDriveQuota returns null on 404) counts as
       // "not added", same as a real error — not a silent success with 0 bytes. This is what backs
@@ -158,6 +163,9 @@ async function syncSharePoint(client: Awaited<ReturnType<typeof graphClientForTe
   let failed = 0;
   await runThrottled(sites, (site) => getSiteDriveQuota(client, site.id), {
     isCancelled: () => isCancelled(syncJobId),
+    // Same reasoning as syncOneDrive's batchSize bump — this is often the largest resource count
+    // (thousands of sites), so it benefits the most from higher concurrency.
+    batchSize: 40,
     onItemSettled: async (site, result) => {
       if (result.ok && result.value !== null) {
         const quota = result.value;
@@ -209,7 +217,11 @@ export const cloudSyncWorker = new Worker(
     const info = row.rows[0];
     if (!info) throw new Error(`sync_jobs ${syncJobId} not found`);
 
-    await query(`UPDATE sync_jobs SET status = 'running', started_at = now() WHERE id = $1`, [syncJobId]);
+    // See jobs/cleaningScanWorker.ts's identical comment: processed_users must reset here too, or a
+    // BullMQ stalled-job redelivery (previous attempt's worker died mid-run) keeps incrementing on
+    // top of the dead attempt's count against a freshly-set total_users, and the sync never visibly
+    // reaches 100%.
+    await query(`UPDATE sync_jobs SET status = 'running', started_at = now(), processed_users = 0 WHERE id = $1`, [syncJobId]);
     await logConnectionEvent("job_started", info.connection_id, info.tenant_id, { syncJobId, cloudType: info.cloud_type });
 
     try {

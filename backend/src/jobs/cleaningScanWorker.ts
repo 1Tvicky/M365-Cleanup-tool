@@ -198,7 +198,12 @@ export const cleaningScanWorker = new Worker(
     const info = row.rows[0];
     if (!info) throw new Error(`cleaning_scans ${scanId} not found`);
 
-    await query(`UPDATE cleaning_scans SET status = 'running', started_at = now() WHERE id = $1`, [scanId]);
+    // processed_items must be reset here, not just total_items — if BullMQ's stalled-job recovery
+    // redelivers this job (its previous attempt's worker died mid-run, e.g. a server restart), the
+    // processor below sets a fresh total_items but only ever increments processed_items; without
+    // this reset it keeps climbing on top of the dead attempt's count, which is how a scan already
+    // ends up reporting more processed than total and never reaches 100%.
+    await query(`UPDATE cleaning_scans SET status = 'running', started_at = now(), processed_items = 0 WHERE id = $1`, [scanId]);
     await logConnectionEvent("cleaning_scan_started", info.connection_id, info.tenant_id, { scanId, scanType: info.scan_type });
 
     try {

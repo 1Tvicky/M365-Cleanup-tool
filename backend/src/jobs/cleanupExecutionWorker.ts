@@ -110,7 +110,9 @@ export const cleanupExecutionWorker = new Worker(
       [operationId]
     );
 
-    await query(`UPDATE cleanup_operations SET status = 'running', started_at = now() WHERE id = $1`, [operationId]);
+    // Same reasoning as jobs/cleaningScanWorker.ts's identical reset: a BullMQ stalled-job
+    // redelivery must not keep incrementing processed_items on top of a dead attempt's count.
+    await query(`UPDATE cleanup_operations SET status = 'running', started_at = now(), processed_items = 0 WHERE id = $1`, [operationId]);
     const touchedConnections = [...new Set(pending.rows.map((r) => r.connection_id))];
     for (const connectionId of touchedConnections) {
       await logConnectionEvent("cleanup_started", connectionId, info.tenant_id, { operationId });
