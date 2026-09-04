@@ -126,7 +126,9 @@ export function CleaningPage() {
     return <ReviewPage totals={totals} onBack={() => setView("dashboard")} />;
   }
 
-  const showSelectionBar = view !== "landing" && hasSelection(totals);
+  // Only shown on the actual selection tables — not on the dashboard or landing page, where it
+  // would float over content with no table underneath it for the selection to relate to.
+  const showSelectionBar = (view === "onedrive" || view === "sharepoint" || view === "teams") && hasSelection(totals);
 
   return (
     <div className={`px-8 py-6 ${showSelectionBar ? "pb-24" : ""}`}>
