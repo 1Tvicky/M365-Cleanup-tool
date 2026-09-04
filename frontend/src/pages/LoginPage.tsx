@@ -37,6 +37,11 @@ function readOAuthErrorCode(): string | null {
   return new URLSearchParams(window.location.search).get("error");
 }
 
+/** Same "pure, read-only lazy initializer" reasoning as readOAuthErrorCode above. */
+function readMode(): "login" | "forgot" {
+  return new URLSearchParams(window.location.search).get("mode") === "forgot" ? "forgot" : "login";
+}
+
 /**
  * Matches CloudFuze's existing split-panel login screen (layout, colors, form elements), adapted
  * to this tool's scope: copy talks about cleanup, not migration, and the provider row at the
@@ -45,20 +50,46 @@ function readOAuthErrorCode(): string | null {
  * Wired to the real backend (backend/src/routes/session.ts) — see docs/login-test-case-coverage.md.
  */
 export function LoginPage({ onLogin }: { onLogin: (operator: OperatorSummary) => void }) {
-  const [mode, setMode] = useState<"login" | "forgot">("login");
+  const [mode, setMode] = useState<"login" | "forgot">(readMode);
   const [oauthErrorCode] = useState(readOAuthErrorCode);
   const oauthError = oauthErrorCode ? (OAUTH_ERROR_MESSAGES[oauthErrorCode] ?? "Sign-in didn't complete. Please try again.") : null;
 
   useEffect(() => {
     if (oauthErrorCode) {
-      // Strip the param so a refresh doesn't keep re-showing the same error. Runs here (not in
-      // the lazy initializer above) so StrictMode's double-invoke can't race the read against it.
-      window.history.replaceState({}, "", window.location.pathname);
+      // Strip just the error param (keep `mode`/anything else) so a refresh doesn't keep
+      // re-showing the same error. Runs here (not in the lazy initializer above) so StrictMode's
+      // double-invoke can't race the read against it.
+      const params = new URLSearchParams(window.location.search);
+      params.delete("error");
+      const search = params.toString();
+      window.history.replaceState({}, "", `${window.location.pathname}${search ? `?${search}` : ""}`);
     }
     // Must land before any POST — the CSRF cookie doesn't exist until this resolves.
     bootstrapCsrf().catch(() => {
       /* login itself will fail loudly if this never lands; nothing useful to show yet */
     });
+  }, []);
+
+  // Reflects login/forgot-password in the URL as a `?mode=` param — deliberately layered on
+  // whatever pathname is already there (never forces a dedicated "/login" path) so a deep link
+  // typed while logged out (e.g. straight to /cleaning) still lands there once login succeeds.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (mode === "forgot") params.set("mode", "forgot");
+    else params.delete("mode");
+    const search = params.toString();
+    const url = `${window.location.pathname}${search ? `?${search}` : ""}`;
+    if (`${window.location.pathname}${window.location.search}` !== url) {
+      window.history.pushState({}, "", url);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    function onPopState() {
+      setMode(readMode());
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   return (

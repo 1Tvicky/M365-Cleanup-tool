@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { ReportsTable } from "../components/reports/ReportsTable";
 import { CleanupProgressView } from "../components/cleaning/CleanupProgress";
 import { CleanupResultsView } from "../components/cleaning/CleanupResults";
@@ -8,19 +8,31 @@ import { ApiClientError } from "../api/client";
 const PAGE_SIZE = 20;
 const TERMINAL_STATUSES = new Set<CleanupOperationStatus>(["completed", "completed_with_errors", "failed", "cancelled"]);
 
+/** Reads `?operationId=&page=` back out — used on mount (deep link / reload) and on Back/Forward. */
+function reportsStateFromUrl(): { operationId: string | null; page: number } {
+  const params = new URLSearchParams(window.location.search);
+  return { operationId: params.get("operationId"), page: Math.max(1, Number(params.get("page")) || 1) };
+}
+
 /**
  * Lists real cleanup_operations (no separate "job" model) and drills into one via a plain internal
  * list/detail switch — reuses CleanupProgressView/CleanupResultsView unchanged, exactly as they're
- * used from CleaningPage's own view switch.
+ * used from CleaningPage's own view switch. Owns its own URL sync (like CleaningPage does for its
+ * tenant/view): `?operationId=` names the open detail (and doubles as the "Start Cleanup" redirect
+ * target, set by App.tsx before this component even mounts), `?page=` names the list's current page.
  */
-export function ReportsPage({ deepLinkOperationId }: { deepLinkOperationId?: string | null }) {
+export function ReportsPage() {
+  const [initial] = useState(reportsStateFromUrl);
   const [operations, setOperations] = useState<CleanupOperationRow[]>([]);
   const [total, setTotal] = useState(0);
-  const [page, setPage] = useState(1);
+  const [page, setPage] = useState(initial.page);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [detailOperationId, setDetailOperationId] = useState<string | null>(deepLinkOperationId ?? null);
+  const [detailOperationId, setDetailOperationId] = useState<string | null>(initial.operationId);
   const [detailIsRunning, setDetailIsRunning] = useState(true);
+  // Tracks the previous detailOperationId so the URL-sync effect below can tell "opened/closed a
+  // detail" (worth a Back stop) apart from "just changed list page" (shouldn't be — see that effect).
+  const prevDetailIdRef = useRef(initial.operationId);
 
   function load(targetPage: number) {
     setLoading(true);
@@ -39,15 +51,43 @@ export function ReportsPage({ deepLinkOperationId }: { deepLinkOperationId?: str
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page]);
 
-  // Deep-link from "Start Cleanup" (?operationId=...) — resolve whether it's still running so we
-  // land on the right sub-view without waiting for the list to load first.
+  // Deep-link / reload with ?operationId= already in the URL — resolve whether it's still running
+  // so we land on the right sub-view without waiting for the list to load first. Only ever needs to
+  // run once for whatever the URL said at mount; openDetails/the popstate handler cover the rest.
   useEffect(() => {
-    if (!deepLinkOperationId) return;
-    setDetailOperationId(deepLinkOperationId);
-    getCleanupProgress(deepLinkOperationId)
+    if (!initial.operationId) return;
+    getCleanupProgress(initial.operationId)
       .then((p) => setDetailIsRunning(!TERMINAL_STATUSES.has(p.status)))
       .catch(() => {});
-  }, [deepLinkOperationId]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Keeps the address bar naming the operation (or list page) actually on screen. Opening/closing a
+  // detail is a real navigation (pushState — worth a Back stop); paging through the list by itself
+  // is a within-page adjustment (replaceState — Back shouldn't have to click through every page).
+  useEffect(() => {
+    const url = detailOperationId ? `/reports?operationId=${detailOperationId}` : page > 1 ? `/reports?page=${page}` : "/reports";
+    const current = `${window.location.pathname}${window.location.search}`;
+    const detailChanged = prevDetailIdRef.current !== detailOperationId;
+    prevDetailIdRef.current = detailOperationId;
+    if (current === url) return;
+    if (detailChanged) window.history.pushState({}, "", url);
+    else window.history.replaceState({}, "", url);
+  }, [detailOperationId, page]);
+
+  useEffect(() => {
+    function onPopState() {
+      const restored = reportsStateFromUrl();
+      setDetailOperationId(restored.operationId);
+      setPage(restored.page);
+      if (restored.operationId) {
+        const op = operations.find((o) => o.id === restored.operationId);
+        setDetailIsRunning(op ? !TERMINAL_STATUSES.has(op.status) : true);
+      }
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, [operations]);
 
   function openDetails(operationId: string) {
     const op = operations.find((o) => o.id === operationId);

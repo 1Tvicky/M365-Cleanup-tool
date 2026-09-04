@@ -16,13 +16,17 @@ import type { Workload } from "../types";
 
 type Tab = "add" | "manage";
 
+function readTab(): Tab {
+  return new URLSearchParams(window.location.search).get("tab") === "manage" ? "manage" : "add";
+}
+
 // Any connection in one of these states has an active enumeration job worth polling for.
 function hasLiveWork(rows: ManageCloudsRow[]): boolean {
   return rows.some((r) => r.status === "connecting" || (r.totalUsers > 0 && r.processedUsers < r.totalUsers));
 }
 
 export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; onLogout: () => void }) {
-  const [tab, setTab] = useState<Tab>("add");
+  const [tab, setTab] = useState<Tab>(readTab);
   const [connections, setConnections] = useState<ManageCloudsRow[]>([]);
   const [loading, setLoading] = useState(true);
   // A Set, not a single value: onboarding one cloud (e.g. OneDrive) must not block starting
@@ -59,6 +63,23 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
       if (pollRef.current) clearInterval(pollRef.current);
     };
   }, [connections, refresh]);
+
+  // Keeps the address bar naming whichever tab is actually showing — `?tab=manage`, or no param at
+  // all for the default "Add clouds" tab, matching this page's own top-level path ("/clouds").
+  useEffect(() => {
+    const url = tab === "manage" ? "/clouds?tab=manage" : "/clouds";
+    if (`${window.location.pathname}${window.location.search}` !== url) {
+      window.history.pushState({}, "", url);
+    }
+  }, [tab]);
+
+  useEffect(() => {
+    function onPopState() {
+      setTab(readTab());
+    }
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
 
   function showToast(message: string, ok = false) {
     setToast({ message, ok });
