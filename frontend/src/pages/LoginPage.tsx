@@ -70,9 +70,8 @@ export function LoginPage({ onLogin }: { onLogin: (operator: OperatorSummary) =>
     });
   }, []);
 
-  // Reflects login/forgot-password in the URL as a `?mode=` param — deliberately layered on
-  // whatever pathname is already there (never forces a dedicated "/login" path) so a deep link
-  // typed while logged out (e.g. straight to /cleaning) still lands there once login succeeds.
+  // Reflects login/forgot-password in the URL as a `?mode=` param, layered on whatever the current
+  // path is (App.tsx already put this on /login, keeping any deep-link target in ?redirect=).
   useEffect(() => {
     const params = new URLSearchParams(window.location.search);
     if (mode === "forgot") params.set("mode", "forgot");
@@ -131,7 +130,12 @@ export function LoginPage({ onLogin }: { onLogin: (operator: OperatorSummary) =>
 
       <div className="flex flex-1 flex-col items-center justify-center bg-white px-6 py-12">
         {mode === "login" ? (
-          <LoginForm onLogin={onLogin} onForgotPassword={() => setMode("forgot")} initialError={oauthError} />
+          <LoginForm
+            onLogin={onLogin}
+            onForgotPassword={() => setMode("forgot")}
+            initialError={oauthError}
+            redirectTo={new URLSearchParams(window.location.search).get("redirect") ?? "/"}
+          />
         ) : (
           <ForgotPasswordForm onBackToLogin={() => setMode("login")} />
         )}
@@ -144,10 +148,12 @@ function LoginForm({
   onLogin,
   onForgotPassword,
   initialError,
+  redirectTo,
 }: {
   onLogin: (operator: OperatorSummary) => void;
   onForgotPassword: () => void;
   initialError: string | null;
+  redirectTo: string;
 }) {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
@@ -229,7 +235,7 @@ function LoginForm({
 
       <div className="mt-5 flex gap-3">
         <a
-          href={googleLoginHref("/")}
+          href={googleLoginHref(redirectTo)}
           className="flex flex-1 items-center overflow-hidden rounded-lg border border-slate-200 bg-[#4285F4] text-sm font-medium text-white hover:brightness-105"
         >
           <span className="flex h-full items-center bg-white px-2.5 py-2.5">
@@ -238,7 +244,7 @@ function LoginForm({
           <span className="flex-1 text-center">Sign in with Google</span>
         </a>
         <a
-          href={office365LoginHref("/")}
+          href={office365LoginHref(redirectTo)}
           className="flex flex-1 items-center justify-between rounded-lg border border-slate-300 bg-white px-4 py-3 text-sm font-medium text-slate-700 hover:bg-slate-50"
         >
           Office 365

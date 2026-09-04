@@ -20,6 +20,16 @@ function pageFromPath(pathname: string): Page {
   return "clouds";
 }
 
+// Wherever the browser was pointed when the app booted — captured once, at module load, before
+// anything below has a chance to rewrite the URL to /login. Used to send the user back to a deep
+// link (e.g. /cleaning?group=...) they hit while logged out, once they actually sign in.
+const bootLocation = `${window.location.pathname}${window.location.search}`;
+
+/** Only ever a same-origin path — never follows an absolute/protocol-relative URL some other origin could have set. */
+function isSafeRedirectTarget(value: string | null): value is string {
+  return !!value && value.startsWith("/") && !value.startsWith("//");
+}
+
 export default function App() {
   const [operator, setOperator] = useState<OperatorSummary | null>(null);
   const [checkingSession, setCheckingSession] = useState(true);
@@ -43,6 +53,23 @@ export default function App() {
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
+
+  // While logged out (including right after logging out from some other page), the address bar
+  // should say /login, not whatever page happened to be showing — but keep the original target as
+  // ?redirect= so handleLogin below can still send the user back there.
+  useEffect(() => {
+    if (checkingSession || operator || window.location.pathname === "/login") return;
+    const url = bootLocation && bootLocation !== "/" ? `/login?redirect=${encodeURIComponent(bootLocation)}` : "/login";
+    window.history.pushState({}, "", url);
+  }, [checkingSession, operator]);
+
+  function handleLogin(op: OperatorSummary) {
+    setOperator(op);
+    const redirect = new URLSearchParams(window.location.search).get("redirect");
+    const target = isSafeRedirectTarget(redirect) ? redirect : PAGE_PATH.clouds;
+    setPage(pageFromPath(target.split("?")[0]!));
+    window.history.pushState({}, "", target);
+  }
 
   async function handleLogout() {
     try {
@@ -68,7 +95,7 @@ export default function App() {
   }
 
   if (!operator) {
-    return <LoginPage onLogin={setOperator} />;
+    return <LoginPage onLogin={handleLogin} />;
   }
 
   return (
