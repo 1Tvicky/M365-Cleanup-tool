@@ -17,22 +17,22 @@ const GRAPH_SCOPE = "https://graph.microsoft.com/.default";
 let msalApp: ConfidentialClientApplication | null = null;
 
 function getMsalApp(): ConfidentialClientApplication {
-  const hasCert = Boolean(config.azure.certThumbprint && config.azure.certPrivateKeyPath);
-  if (!config.azure.clientId || (!hasCert && !config.azure.clientSecret)) {
+  const hasCert = Boolean(config.microsoft.certThumbprint && config.microsoft.certPrivateKeyPath);
+  if (!config.microsoft.clientId || (!hasCert && !config.microsoft.clientSecret)) {
     throw new ApiError(503, "M365_TENANT_ACCESS_NOT_CONFIGURED", "M365 tenant access isn't configured on this deployment yet");
   }
   if (!msalApp) {
     msalApp = new ConfidentialClientApplication({
       auth: {
-        clientId: config.azure.clientId,
+        clientId: config.microsoft.clientId,
         ...(hasCert
           ? {
               clientCertificate: {
-                thumbprint: config.azure.certThumbprint!,
-                privateKey: readPrivateKey(config.azure.certPrivateKeyPath!),
+                thumbprint: config.microsoft.certThumbprint!,
+                privateKey: readPrivateKey(config.microsoft.certPrivateKeyPath!),
               },
             }
-          : { clientSecret: config.azure.clientSecret }),
+          : { clientSecret: config.microsoft.clientSecret }),
       },
     });
   }

@@ -7,6 +7,14 @@ registered as a **multi-tenant** Azure AD application in CloudFuze's own Azure A
 customer tenant admin consents to it independently — CloudFuze never has standing access to a
 customer tenant until that tenant's Global Admin (or Privileged Role Admin) explicitly grants it.
 
+**This is a dedicated app registration for this cleanup tool.** It is not shared with, and does
+not reuse the client ID/secret of, any other CloudFuze product (including the migration tool,
+which has its own separate registration). Customers never provide their own client ID/secret and
+never create an app registration of their own — the only customer-side action is an admin signing
+in and granting consent, which is what causes Azure AD to automatically provision the
+corresponding Enterprise Application / service principal in *their* tenant. Nothing in this app
+programmatically creates an app registration inside a customer's tenant.
+
 ## 1. Create the app registration
 
 - Azure Portal → Azure Active Directory → App registrations → New registration
@@ -100,16 +108,22 @@ PKCE, run in a popup window, rather than the bare `/adminconsent` redirect in §
      &response_type=code
      &redirect_uri={https://<app-host>/api/auth/m365/callback}
      &scope=https://graph.microsoft.com/.default offline_access openid profile
-     &prompt=admin_consent
+     &prompt=consent
      &state={signed state}
      &code_challenge={challenge}
      &code_challenge_method=S256
    ```
 
+   `prompt=consent` (not `admin_consent` — that value belongs only to the older, separate
+   `/adminconsent` endpoint used by the legacy §4 flow, and MSAL Node rejects it outright on this
+   v2.0 `/authorize` endpoint with `invalid_prompt_value`).
+
 2. The customer's Global/SharePoint Admin signs into **Microsoft's own hosted page** with their
-   M365 credentials — this app never sees or handles that password. `prompt=admin_consent` makes
-   Microsoft show its native admin-consent screen here if the app doesn't yet have consent for its
-   configured permissions in that tenant; we don't build our own consent UI.
+   M365 credentials — this app never sees or handles that password. `prompt=consent` makes
+   Microsoft show its native consent screen here; for a Global Admin, that screen additionally
+   offers a "Consent on behalf of your organization" option, which is what actually grants the
+   app's configured Application permissions tenant-wide (not just to that one signed-in user). We
+   don't build our own consent UI.
 3. Microsoft redirects the popup to `redirect_uri` with `code` and `state` (or `error` if the admin
    declined). The backend validates `state`'s signature/expiry, retrieves the matching PKCE
    verifier, and exchanges `code` via MSAL Node's `ConfidentialClientApplication.acquireTokenByCode`.

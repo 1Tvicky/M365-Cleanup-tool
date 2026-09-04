@@ -1,3 +1,4 @@
+import { randomBytes } from "node:crypto";
 import { Router } from "express";
 import { query } from "../db/pool.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
@@ -245,6 +246,33 @@ cloudConnectionsRouter.delete(
 
 export const m365ConnectCallbackRouter = Router();
 
+/**
+ * helmet()'s default Cross-Origin-Opener-Policy is "same-origin" (app.ts). Since this callback
+ * page is served from a different origin than the frontend that opened the popup
+ * (localhost:4000 vs. localhost:5173, and in production the popup lands here after several
+ * cross-origin hops through login.microsoftonline.com), that default severs `window.opener` the
+ * moment this page loads — silently breaking both the postMessage handshake back to the opener
+ * AND this page's own permission to call `window.close()` on itself (browsers tie "can this
+ * script close its own window" to the browsing-context-group lineage that COOP just cut). Neither
+ * failure throws or logs anything, which is why it looked like "it connected but the popup just
+ * sits there and Manage Clouds never updates." Override to unsafe-none for this one route only.
+ */
+m365ConnectCallbackRouter.use((_req, res, next) => {
+  res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
+  // helmet()'s default CSP (app.ts) is script-src 'self', which blocks inline <script> tags
+  // outright with no exception — silently, no visible error, which is exactly why the postMessage
+  // + window.close() script below never ran on any earlier attempt regardless of what the script
+  // itself contained. This page is fully self-contained (no images/fonts/external resources), so
+  // replace the default with a minimal CSP scoped to just this response, using a fresh per-request
+  // nonce to allow only this one inline script to run.
+  res.locals.cspNonce = randomBytes(16).toString("base64");
+  res.setHeader(
+    "Content-Security-Policy",
+    `default-src 'none'; script-src 'nonce-${res.locals.cspNonce}'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'`
+  );
+  next();
+});
+
 const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
   onedrive: "OneDrive for Business",
   sharepoint: "SharePoint Online",
@@ -257,12 +285,17 @@ const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
  * shows a brief branded success/error confirmation instead of an instant silent close, then
  * posts the result to the opener and closes itself.
  */
-function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: CloudType | null; reason?: string }): string {
+function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: CloudType | null; reason?: string; nonce: string }): string {
   const label = opts.cloudType ? CLOUD_TYPE_LABELS[opts.cloudType] : "your cloud";
   const message = opts.ok
     ? `Your ${label} account has been connected!`
     : `We couldn't connect ${label}${opts.reason ? ` — ${opts.reason}` : ""}.`;
   const iconColor = opts.ok ? "#1b2fc4" : "#dc2626";
+  // The HTML parser scans for "</script" (even inside what's meant to be a JS string literal)
+  // before the JS parser ever runs — so a payload field containing that literal substring (e.g. an
+  // attacker-crafted ?error= query param reflected into payload.reason) could otherwise break out
+  // of this script tag. Escaping "<" defeats that regardless of where it appears in the JSON.
+  const payloadJson = JSON.stringify(opts.payload).replace(/</g, "\\u003c");
 
   return `<!doctype html><html><head><meta charset="utf-8"><title>CloudFuze</title></head>
 <body style="margin:0;font-family:-apple-system,Segoe UI,Arial,sans-serif;display:flex;align-items:center;justify-content:center;height:100vh;background:#fff;">
@@ -273,8 +306,13 @@ function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: Cloud
       ${opts.ok ? "&#10003;" : "&#33;"}
     </div>
   </div>
-  <script>
-    window.opener && window.opener.postMessage(${JSON.stringify(opts.payload)}, window.location.origin);
+  <script nonce="${opts.nonce}">
+    // Target "*": this page (served from the backend's own origin) has no reliable way to know
+    // the opener's real origin cross-origin (it can differ from ours, e.g. localhost:4000 here vs.
+    // the frontend's localhost:5173 in dev) — window.location.origin would evaluate to THIS page's
+    // origin, not the opener's, causing postMessage to silently drop the message on delivery.
+    // The frontend validates the message came from this exact popup via event.source instead.
+    window.opener && window.opener.postMessage(${payloadJson}, "*");
     setTimeout(function () { window.close(); }, 1200);
   </script>
 </body></html>`;
@@ -297,6 +335,7 @@ m365ConnectCallbackRouter.get(
           ok: false,
           cloudType: null,
           reason: "your session expired, please try again",
+          nonce: res.locals.cspNonce,
         })
       );
       return;
@@ -311,6 +350,7 @@ m365ConnectCallbackRouter.get(
           ok: false,
           cloudType: claims.cloudType,
           reason: "sign-in was cancelled",
+          nonce: res.locals.cspNonce,
         })
       );
       return;
@@ -355,6 +395,18 @@ m365ConnectCallbackRouter.get(
       );
       const connectionId = connResult.rows[0]!.id;
 
+      // Every /api/clouds/* route (including GET /manage) scopes access through tenant_roles —
+      // without this, the tenant this operator just connected would be invisible to them too,
+      // since that join would simply exclude it. requireInternalAdmin already gated who could
+      // reach this flow, so cleanup_admin here reflects that they're not merely a viewer.
+      // ON CONFLICT DO NOTHING: don't downgrade a role a different grant may have already set.
+      await query(
+        `INSERT INTO tenant_roles (tenant_id, operator_id, role, granted_by)
+         VALUES ($1, $2, 'cleanup_admin', $2)
+         ON CONFLICT (tenant_id, operator_id) DO NOTHING`,
+        [tenantId, claims.operatorId]
+      );
+
       await query(
         `INSERT INTO connection_events (connection_id, tenant_id, event, operator_id, detail) VALUES ($1, $2, 'token_exchange', $3, $4)`,
         [connectionId, tenantId, claims.operatorId, { adminUpn: identity.adminUpn }]
@@ -375,6 +427,7 @@ m365ConnectCallbackRouter.get(
           payload: { type: "m365-connect-complete", status: "success", connectionId, cloudType: claims.cloudType },
           ok: true,
           cloudType: claims.cloudType,
+          nonce: res.locals.cspNonce,
         })
       );
     } catch (err) {
@@ -385,6 +438,7 @@ m365ConnectCallbackRouter.get(
           ok: false,
           cloudType: claims.cloudType,
           reason: "something went wrong, please try again",
+          nonce: res.locals.cspNonce,
         })
       );
     }

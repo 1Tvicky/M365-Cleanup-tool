@@ -24,6 +24,21 @@ interface ConnectionUserUpsert {
   errorMessage: string | null;
 }
 
+/**
+ * Deletes connection_users rows left over from a previous sync whose subject (a user for
+ * onedrive/teams, a site for sharepoint — connection_users doubles for both, scoped 1:1 by
+ * connection_id since each connection is a single cloud_type) is no longer in the current
+ * enumeration. Without this, someone excluded by a filter change (or removed/disabled in the
+ * tenant) would linger forever, permanently inflating "not added" counts beyond the current
+ * sync_jobs.total_users.
+ */
+async function pruneStaleConnectionUsers(connectionId: string, currentIds: string[]): Promise<void> {
+  await query(`DELETE FROM connection_users WHERE connection_id = $1 AND NOT (graph_user_id = ANY($2::text[]))`, [
+    connectionId,
+    currentIds,
+  ]);
+}
+
 async function upsertConnectionUser(connectionId: string, row: ConnectionUserUpsert): Promise<void> {
   await query(
     `INSERT INTO connection_users
@@ -203,10 +218,12 @@ export const cloudSyncWorker = new Worker(
 
       if (info.cloud_type === "sharepoint") {
         const sites = await searchSites(client);
+        await pruneStaleConnectionUsers(info.connection_id, sites.map((s) => s.id));
         await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, sites.length]);
         failed = await syncSharePoint(client, info.connection_id, syncJobId, sites);
       } else {
         const users = await listAllUsers(client);
+        await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
         await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
         failed = info.cloud_type === "onedrive"
           ? await syncOneDrive(client, info.connection_id, syncJobId, users)

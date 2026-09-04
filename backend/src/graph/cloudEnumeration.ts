@@ -12,10 +12,18 @@ export interface BasicUser {
   displayName: string | null;
 }
 
-/** Paginates GET /users tenant-wide. Large tenants can have thousands of users — this is the slow part of a OneDrive/Teams sync. */
+/**
+ * Paginates GET /users tenant-wide. Large tenants can have thousands of users — this is the slow
+ * part of a OneDrive/Teams sync. Scoped to accountEnabled=true, userType=Member: unfiltered,
+ * /users returns every object in the directory, including guests and disabled former-employee
+ * accounts that mostly never had a real OneDrive provisioned — inflating the total and producing a
+ * pile of "no OneDrive provisioned" failures that aren't actionable for cleanup. Both properties
+ * support simple $filter (eq) without needing ConsistencyLevel/advanced query support.
+ */
 export async function listAllUsers(client: Client): Promise<BasicUser[]> {
   const users: BasicUser[] = [];
-  let url: string | undefined = "/users?$select=id,userPrincipalName,displayName&$top=999";
+  let url: string | undefined =
+    "/users?$filter=accountEnabled eq true and userType eq 'Member'&$select=id,userPrincipalName,displayName&$top=999";
 
   while (url) {
     const res: any = await client.api(url).get();

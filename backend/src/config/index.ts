@@ -8,15 +8,21 @@ export const config = {
   port: Number(process.env.PORT ?? 4000),
   nodeEnv: process.env.NODE_ENV ?? "development",
 
-  azure: {
-    clientId: process.env.AZURE_CLIENT_ID ?? "",
-    redirectUri: process.env.AZURE_APP_REDIRECT_URI ?? "", // legacy /adminconsent flow — docs/azure-ad-app-registration.md §4
-    clientSecret: process.env.AZURE_CLIENT_SECRET,
-    certThumbprint: process.env.AZURE_CLIENT_CERT_THUMBPRINT,
-    certPrivateKeyPath: process.env.AZURE_CLIENT_CERT_PRIVATE_KEY_PATH,
+  // Our own dedicated Microsoft Entra app registration for this cleanup tool — one multi-tenant
+  // app, owned by us, never a customer's and never shared with any other CloudFuze product (e.g.
+  // the migration tool has its own separate registration). See docs/azure-ad-app-registration.md.
+  microsoft: {
+    clientId: process.env.MICROSOFT_CLIENT_ID ?? "",
+    clientSecret: process.env.MICROSOFT_CLIENT_SECRET,
+    certThumbprint: process.env.MICROSOFT_CLIENT_CERT_THUMBPRINT,
+    certPrivateKeyPath: process.env.MICROSOFT_CLIENT_CERT_PRIVATE_KEY_PATH,
+    // Multi-tenant authority — "common" accepts a sign-in from any organizational directory,
+    // never a single hardcoded customer tenant.
+    authority: process.env.MICROSOFT_AUTHORITY ?? "https://login.microsoftonline.com/common",
+    redirectUri: process.env.MICROSOFT_LEGACY_REDIRECT_URI ?? "", // legacy /adminconsent flow — docs/azure-ad-app-registration.md §4
     // Add Clouds per-cloud-type connect flow — docs/azure-ad-app-registration.md §4a. Same app
     // registration/credentials as above, different registered redirect URI.
-    connectRedirectUri: process.env.M365_CONNECT_REDIRECT_URI ?? "",
+    connectRedirectUri: process.env.MICROSOFT_REDIRECT_URI ?? "",
   },
 
   tokenEncryption: {

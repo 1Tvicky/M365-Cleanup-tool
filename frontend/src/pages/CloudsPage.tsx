@@ -69,12 +69,21 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
     try {
       const { authorizeUrl } = await initCloudConnect(workload);
       const result = await openConnectPopup(authorizeUrl);
+      // The popup's postMessage handshake back to this window depends on the browser preserving
+      // window.opener across Microsoft's entire real login+consent page sequence, which we don't
+      // control and can't fully verify — a "closed" result here is ambiguous, not necessarily a
+      // cancellation. The connections row is already created server-side by the callback before
+      // the popup ever tries to message back, so re-check the real state instead of trusting the
+      // message alone; this is what actually makes Manage Clouds reliable regardless of whether
+      // the message got through.
+      await refresh();
       if (result.status === "success") {
         showToast("Connected — enumeration is running in the background.");
         setTab("manage");
-        await refresh();
       } else if (result.reason !== "closed") {
         showToast(`Couldn't connect: ${result.reason}`);
+      } else {
+        setTab("manage");
       }
     } catch (err) {
       showToast(err instanceof ApiClientError ? err.message : "Couldn't start the connection. Try again.");

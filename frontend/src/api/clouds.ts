@@ -81,7 +81,11 @@ export function openConnectPopup(authorizeUrl: string): Promise<M365ConnectMessa
     }
 
     function onMessage(event: MessageEvent) {
-      if (event.origin !== window.location.origin) return;
+      // Validate by window identity, not origin: the popup is served from the backend's origin
+      // (different from this frontend's own origin in dev, and not guaranteed to match in
+      // production either), so comparing event.origin to window.location.origin here would always
+      // fail. We already hold a reference to the exact window we opened — trust messages from it.
+      if (event.source !== popup) return;
       const data = event.data as M365ConnectMessage;
       if (data?.type !== "m365-connect-complete") return;
       cleanup();

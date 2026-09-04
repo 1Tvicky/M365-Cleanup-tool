@@ -11,8 +11,8 @@ authRouter.get("/consent-url", requireSession, (req, res) => {
   const tenantHint = typeof req.query.tenantHint === "string" ? req.query.tenantHint : "common";
   const consentUrl =
     `https://login.microsoftonline.com/${encodeURIComponent(tenantHint)}/adminconsent` +
-    `?client_id=${encodeURIComponent(config.azure.clientId)}` +
-    `&redirect_uri=${encodeURIComponent(config.azure.redirectUri)}`;
+    `?client_id=${encodeURIComponent(config.microsoft.clientId)}` +
+    `&redirect_uri=${encodeURIComponent(config.microsoft.redirectUri)}`;
   res.json({ consentUrl });
 });
 
