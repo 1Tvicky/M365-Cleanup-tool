@@ -42,6 +42,15 @@ function readMode(): "login" | "forgot" {
   return new URLSearchParams(window.location.search).get("mode") === "forgot" ? "forgot" : "login";
 }
 
+// Distinct from OAUTH_ERROR_MESSAGES above since this isn't a failure, just an automatic security
+// behavior — styled as an info notice, not an error.
+const IDLE_LOGOUT_MESSAGE = "You were logged out after 15 minutes of inactivity.";
+
+/** Fallback for a direct reload/navigation to /login?reason=idle (no race there — the param is already in the URL at mount, nothing else is racing to write it). */
+function readLogoutReason(): string | null {
+  return new URLSearchParams(window.location.search).get("reason");
+}
+
 /**
  * Matches CloudFuze's existing split-panel login screen (layout, colors, form elements), adapted
  * to this tool's scope: copy talks about cleanup, not migration, and the provider row at the
@@ -49,18 +58,29 @@ function readMode(): "login" | "forgot" {
  *
  * Wired to the real backend (backend/src/routes/session.ts) — see docs/login-test-case-coverage.md.
  */
-export function LoginPage({ onLogin }: { onLogin: (operator: OperatorSummary) => void }) {
+export function LoginPage({
+  onLogin,
+  idleLoggedOut = false,
+}: {
+  onLogin: (operator: OperatorSummary) => void;
+  /** True on the very first render where App.tsx's idle-timeout just fired — see the comment at its call site. */
+  idleLoggedOut?: boolean;
+}) {
   const [mode, setMode] = useState<"login" | "forgot">(readMode);
   const [oauthErrorCode] = useState(readOAuthErrorCode);
   const oauthError = oauthErrorCode ? (OAUTH_ERROR_MESSAGES[oauthErrorCode] ?? "Sign-in didn't complete. Please try again.") : null;
+  // Captured once at mount (lazy initializer) — immune to `idleLoggedOut` flipping back to false a
+  // moment later once App.tsx's own effect resets its logoutReason state.
+  const [logoutNotice] = useState(() => (idleLoggedOut || readLogoutReason() === "idle" ? IDLE_LOGOUT_MESSAGE : null));
 
   useEffect(() => {
-    if (oauthErrorCode) {
-      // Strip just the error param (keep `mode`/anything else) so a refresh doesn't keep
-      // re-showing the same error. Runs here (not in the lazy initializer above) so StrictMode's
+    if (oauthErrorCode || readLogoutReason()) {
+      // Strip just error/reason (keep `mode`/`redirect`/anything else) so a refresh doesn't keep
+      // re-showing the same message. Runs here (not in the lazy initializers above) so StrictMode's
       // double-invoke can't race the read against it.
       const params = new URLSearchParams(window.location.search);
       params.delete("error");
+      params.delete("reason");
       const search = params.toString();
       window.history.replaceState({}, "", `${window.location.pathname}${search ? `?${search}` : ""}`);
     }
@@ -134,6 +154,7 @@ export function LoginPage({ onLogin }: { onLogin: (operator: OperatorSummary) =>
             onLogin={onLogin}
             onForgotPassword={() => setMode("forgot")}
             initialError={oauthError}
+            initialNotice={logoutNotice}
             redirectTo={new URLSearchParams(window.location.search).get("redirect") ?? "/"}
           />
         ) : (
@@ -148,11 +169,13 @@ function LoginForm({
   onLogin,
   onForgotPassword,
   initialError,
+  initialNotice,
   redirectTo,
 }: {
   onLogin: (operator: OperatorSummary) => void;
   onForgotPassword: () => void;
   initialError: string | null;
+  initialNotice: string | null;
   redirectTo: string;
 }) {
   const [email, setEmail] = useState("");
@@ -184,6 +207,10 @@ function LoginForm({
         <p className="mt-2.5 text-base text-slate-400">Welcome back!</p>
         <p className="text-base text-slate-400">Please login to gain access to CloudFuze</p>
       </div>
+
+      {initialNotice && !error && (
+        <div className="mt-6 rounded-lg border border-blue-200 bg-blue-50 px-4 py-3 text-sm text-blue-700">{initialNotice}</div>
+      )}
 
       {error && (
         <div role="alert" className="mt-6 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">

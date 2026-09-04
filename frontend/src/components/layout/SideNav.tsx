@@ -6,7 +6,7 @@ const NAV_ITEMS: { id: Page; label: string; icon: string }[] = [
   { id: "reports", label: "Reports", icon: "\u{1F4CB}" },
 ];
 
-export function SideNav({ active, onNavigate }: { active: Page; onNavigate: (page: Page) => void }) {
+export function SideNav({ active, onNavigate, onLogout }: { active: Page; onNavigate: (page: Page) => void; onLogout: () => void }) {
   return (
     <aside className="flex h-screen w-20 shrink-0 flex-col bg-[#0b1c46]">
       <div className="flex flex-col items-center gap-1 py-5">
@@ -35,7 +35,20 @@ export function SideNav({ active, onNavigate }: { active: Page; onNavigate: (pag
           );
         })}
       </nav>
-      <div className="mt-auto space-y-1 px-3 py-4 text-center text-[9px] leading-tight text-slate-500">
+      <div className="mt-auto px-2 pb-2">
+        {/* CloudsPage also has its own UserMenu/Log out in its header — this one exists so logging
+            out doesn't require navigating to Clouds first; it's reachable from every page. */}
+        <button
+          onClick={onLogout}
+          className="flex w-full flex-col items-center gap-1.5 rounded-md px-1 py-3 text-center text-slate-400 transition-colors hover:bg-white/5 hover:text-slate-200"
+        >
+          <span className="text-lg" aria-hidden>
+            🚪
+          </span>
+          <span className="text-[11px] font-medium leading-tight">Log out</span>
+        </button>
+      </div>
+      <div className="space-y-1 px-3 pb-4 text-center text-[9px] leading-tight text-slate-500">
         <div>Terms of use</div>
         <div>Privacy policy</div>
       </div>
