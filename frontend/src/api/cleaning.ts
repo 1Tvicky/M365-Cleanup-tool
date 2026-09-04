@@ -178,6 +178,9 @@ export interface CleanupProgress extends CleanupOperationRow {
   /** Sum across every OneDrive account / SharePoint site in the operation — 0/0 until file enumeration for at least one item has happened. */
   filesTotal: number;
   filesCompleted: number;
+  /** bytesTotal counts every discovered file; bytesCleared only files actually removed ('deleted'/'already_gone', never 'failed'/'pending') — the number to show as "data cleared". */
+  bytesTotal: number;
+  bytesCleared: number;
 }
 
 /** One row of the live "recently removed" feed on the progress screen. */

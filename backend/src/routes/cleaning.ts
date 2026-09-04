@@ -860,49 +860,65 @@ cleaningRouter.get(
   })
 );
 
+/** Shared by the progress route and the downloadable report, so the two never disagree on totals. */
+async function computeCleanupProgress(operationId: string): Promise<CleanupProgress> {
+  const opResult = await query<CleanupOperationSqlRow>(
+    `SELECT ${CLEANUP_OPERATION_SELECT} FROM cleanup_operations co LEFT JOIN operators o ON o.id = co.requested_by WHERE co.id = $1`,
+    [operationId]
+  );
+  const op = opResult.rows[0];
+  if (!op) throw new ApiError(404, "CLEANUP_OPERATION_NOT_FOUND", "No such cleanup operation");
+
+  const byTypeResult = await query<{ resource_type: CleanupResourceType; status: string; count: string }>(
+    `SELECT resource_type, status, COUNT(*) AS count FROM cleanup_operation_items WHERE cleanup_operation_id = $1 GROUP BY resource_type, status`,
+    [operationId]
+  );
+  const byType = Object.fromEntries(
+    RESOURCE_TYPES.map((t) => [t, { total: 0, completed: 0, failed: 0, skipped: 0, unsupported: 0 }])
+  ) as CleanupProgress["byType"];
+  for (const r of byTypeResult.rows) {
+    const bucket = byType[r.resource_type];
+    const count = Number(r.count);
+    bucket.total += count;
+    if (r.status === "completed") bucket.completed += count;
+    else if (r.status === "failed") bucket.failed += count;
+    else if (r.status === "skipped") bucket.skipped += count;
+    else if (r.status === "unsupported") bucket.unsupported += count;
+  }
+
+  const filesResult = await query<{ files_total: string; files_completed: string }>(
+    `SELECT COALESCE(SUM(files_total), 0) AS files_total, COALESCE(SUM(files_completed), 0) AS files_completed
+     FROM cleanup_operation_items WHERE cleanup_operation_id = $1`,
+    [operationId]
+  );
+
+  // bytesTotal counts every discovered file (known as soon as it's listed, before deletion is attempted);
+  // bytesCleared only 'deleted'/'already_gone' — never 'failed'/'pending' — so it reflects data actually removed.
+  const bytesResult = await query<{ bytes_total: string; bytes_cleared: string }>(
+    `SELECT COALESCE(SUM(cof.file_size_bytes), 0) AS bytes_total,
+            COALESCE(SUM(cof.file_size_bytes) FILTER (WHERE cof.status IN ('deleted', 'already_gone')), 0) AS bytes_cleared
+     FROM cleanup_operation_item_files cof
+     JOIN cleanup_operation_items coi ON coi.id = cof.cleanup_operation_item_id
+     WHERE coi.cleanup_operation_id = $1`,
+    [operationId]
+  );
+
+  return {
+    ...toCleanupOperationRow(op),
+    byType,
+    filesTotal: Number(filesResult.rows[0]!.files_total),
+    filesCompleted: Number(filesResult.rows[0]!.files_completed),
+    bytesTotal: Number(bytesResult.rows[0]!.bytes_total),
+    bytesCleared: Number(bytesResult.rows[0]!.bytes_cleared),
+  };
+}
+
 /** GET /api/cleaning/cleanup/:operationId — progress, for the Cleanup Progress screen's polling. */
 cleaningRouter.get(
   "/cleanup/:operationId",
   asyncHandler(async (req, res) => {
     await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
-
-    const opResult = await query<CleanupOperationSqlRow>(
-      `SELECT ${CLEANUP_OPERATION_SELECT} FROM cleanup_operations co LEFT JOIN operators o ON o.id = co.requested_by WHERE co.id = $1`,
-      [req.params.operationId]
-    );
-    const op = opResult.rows[0];
-    if (!op) throw new ApiError(404, "CLEANUP_OPERATION_NOT_FOUND", "No such cleanup operation");
-
-    const byTypeResult = await query<{ resource_type: CleanupResourceType; status: string; count: string }>(
-      `SELECT resource_type, status, COUNT(*) AS count FROM cleanup_operation_items WHERE cleanup_operation_id = $1 GROUP BY resource_type, status`,
-      [req.params.operationId]
-    );
-    const byType = Object.fromEntries(
-      RESOURCE_TYPES.map((t) => [t, { total: 0, completed: 0, failed: 0, skipped: 0, unsupported: 0 }])
-    ) as CleanupProgress["byType"];
-    for (const r of byTypeResult.rows) {
-      const bucket = byType[r.resource_type];
-      const count = Number(r.count);
-      bucket.total += count;
-      if (r.status === "completed") bucket.completed += count;
-      else if (r.status === "failed") bucket.failed += count;
-      else if (r.status === "skipped") bucket.skipped += count;
-      else if (r.status === "unsupported") bucket.unsupported += count;
-    }
-
-    const filesResult = await query<{ files_total: string; files_completed: string }>(
-      `SELECT COALESCE(SUM(files_total), 0) AS files_total, COALESCE(SUM(files_completed), 0) AS files_completed
-       FROM cleanup_operation_items WHERE cleanup_operation_id = $1`,
-      [req.params.operationId]
-    );
-
-    const progress: CleanupProgress = {
-      ...toCleanupOperationRow(op),
-      byType,
-      filesTotal: Number(filesResult.rows[0]!.files_total),
-      filesCompleted: Number(filesResult.rows[0]!.files_completed),
-    };
-    res.json(progress);
+    res.json(await computeCleanupProgress(req.params.operationId!));
   })
 );
 
@@ -934,45 +950,91 @@ cleaningRouter.get(
   })
 );
 
-/** GET /api/cleaning/cleanup/:operationId/report — downloadable CSV: one row per file (plus one row per skipped/unsupported item, which has no files). */
+/** Human-readable size for the client-facing report — mirrors the frontend's formatBytes (kept separate; this file has no shared dependency on frontend code). */
+function formatBytesForReport(bytes: number): string {
+  if (bytes <= 0) return "0 B";
+  const units = ["B", "KB", "MB", "GB", "TB"];
+  const exp = Math.min(Math.floor(Math.log(bytes) / Math.log(1024)), units.length - 1);
+  return `${(bytes / 1024 ** exp).toFixed(exp === 0 ? 0 : 1)} ${units[exp]}`;
+}
+
+/** Explains why an item was never attempted, for rows that have no other error message — otherwise an 'unsupported' row shows blank Notes and reads like an unexplained gap. */
+function reportNote(status: string, errorMessage: string | null): string {
+  if (errorMessage) return errorMessage;
+  if (status === "unsupported") {
+    return "Not supported: Microsoft Graph has no application-permission (unattended) path to delete Teams channel/chat messages.";
+  }
+  return "";
+}
+
+/**
+ * GET /api/cleaning/cleanup/:operationId/report — downloadable CSV for the client: an operation
+ * summary block (cloud, requester, timing, counts, total data cleared), then one row per file
+ * (plus one row per skipped/unsupported item, which has no files), then a grand total row.
+ */
 cleaningRouter.get(
   "/cleanup/:operationId/report",
   asyncHandler(async (req, res) => {
     await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
 
+    const progress = await computeCleanupProgress(req.params.operationId!);
+
     const result = await query<{
-      resource_name: string; resource_type: CleanupResourceType; file_name: string | null;
-      status: string; completed_at: string | null; error_message: string | null;
+      connection_label: string; resource_name: string; resource_type: CleanupResourceType; file_name: string | null;
+      file_size_bytes: string | null; status: string; completed_at: string | null; error_message: string | null;
     }>(
-      `SELECT coi.display_name AS resource_name, coi.resource_type, cof.file_name,
+      `SELECT c.display_name AS connection_label, coi.display_name AS resource_name, coi.resource_type, cof.file_name,
+              cof.file_size_bytes,
               COALESCE(cof.status, coi.status) AS status,
               COALESCE(cof.completed_at, coi.completed_at) AS completed_at,
               COALESCE(cof.error_message, coi.error_message) AS error_message
        FROM cleanup_operation_items coi
+       JOIN connections c ON c.id = coi.connection_id
        LEFT JOIN cleanup_operation_item_files cof ON cof.cleanup_operation_item_id = coi.id
        WHERE coi.cleanup_operation_id = $1
        ORDER BY coi.display_name, cof.file_name NULLS FIRST`,
       [req.params.operationId]
     );
 
-    const csvEscape = (value: string) => `"${value.replace(/"/g, '""')}"`;
-    const header = ["Resource", "Type", "File", "Status", "Completed At", "Details"].map(csvEscape).join(",");
-    const rows = result.rows.map((r) =>
-      [
-        r.resource_name,
+    const csvEscape = (value: string) => `"${String(value).replace(/"/g, '""')}"`;
+    const csvLine = (values: (string | number)[]) => values.map((v) => csvEscape(String(v))).join(",");
+
+    const summary = [
+      csvLine(["Microsoft 365 Cleanup Report"]),
+      csvLine(["Cloud / Connection", progress.label]),
+      csvLine(["Requested By", progress.requestedBy ? `${progress.requestedBy.displayName} <${progress.requestedBy.email}>` : "—"]),
+      csvLine(["Status", progress.status.replace(/_/g, " ")]),
+      csvLine(["Started", progress.startedAt ?? "—"]),
+      csvLine(["Completed", progress.completedAt ?? "—"]),
+      csvLine(["Total Items", progress.totalItems]),
+      csvLine(["Successful", progress.successfulItems]),
+      csvLine(["Failed", progress.failedItems]),
+      csvLine(["Skipped", progress.skippedItems]),
+      csvLine(["Total Data Cleared", `${formatBytesForReport(progress.bytesCleared)} (${progress.bytesCleared.toLocaleString()} bytes)`]),
+      "",
+    ];
+
+    const header = csvLine(["Cloud / Connection", "Resource Type", "Resource Name", "File Name", "Status", "Size", "Completed At", "Notes"]);
+    let clearedBytes = 0;
+    const rows = result.rows.map((r) => {
+      const size = r.file_name != null && r.file_size_bytes != null ? Number(r.file_size_bytes) : null;
+      if (size != null && (r.status === "deleted" || r.status === "already_gone")) clearedBytes += size;
+      return csvLine([
+        r.connection_label,
         RESOURCE_TYPE_REPORT_LABEL[r.resource_type],
+        r.resource_name,
         r.file_name ?? "",
-        r.status,
+        r.status.replace(/_/g, " "),
+        size != null ? formatBytesForReport(size) : "",
         r.completed_at ?? "",
-        r.error_message ?? "",
-      ]
-        .map((v) => csvEscape(String(v)))
-        .join(",")
-    );
+        reportNote(r.status, r.error_message),
+      ]);
+    });
+    const totalLine = csvLine(["", "", "", "", "TOTAL DATA CLEARED", formatBytesForReport(clearedBytes), "", ""]);
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="cleanup-report-${req.params.operationId}.csv"`);
-    res.send([header, ...rows].join("\r\n"));
+    res.send([...summary, header, ...rows, "", totalLine].join("\r\n"));
   })
 );
 

@@ -124,6 +124,9 @@ export interface CleanupProgress extends CleanupOperationRow {
   /** Sum of cleanup_operation_items.files_total/files_completed across the whole operation — 0/0 until file enumeration for at least one item has happened. */
   filesTotal: number;
   filesCompleted: number;
+  /** Sum of cleanup_operation_item_files.file_size_bytes — bytesTotal counts every discovered file (known as soon as it's listed), bytesCleared only those actually removed ('deleted' or 'already_gone', never 'failed'/'pending'). This is the number the client-facing report calls "data cleared". */
+  bytesTotal: number;
+  bytesCleared: number;
 }
 
 /** One row of the live "recently removed" feed on the progress screen — the same data the CSV report is built from. */

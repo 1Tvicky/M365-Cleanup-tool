@@ -19,6 +19,8 @@ export type DriveOwnerKind = "user" | "site";
 export interface DriveRootChild {
   id: string;
   name: string;
+  /** Bytes, per Graph's driveItem.size — captured at listing time since the delete response carries no size. 0 for a folder (Graph doesn't report a meaningful size for containers) or if Graph omits the field. */
+  size: number;
 }
 
 function driveRootPath(kind: DriveOwnerKind, id: string): string {
@@ -36,12 +38,12 @@ function driveItemPath(kind: DriveOwnerKind, id: string, itemId: string): string
  */
 export async function listDriveRootChildren(client: Client, kind: DriveOwnerKind, id: string): Promise<DriveRootChild[]> {
   const children: DriveRootChild[] = [];
-  let url: string | undefined = `${driveRootPath(kind, id)}?$select=id,name&$top=200`;
+  let url: string | undefined = `${driveRootPath(kind, id)}?$select=id,name,size&$top=200`;
 
   while (url) {
     const res: any = await client.api(url).get();
     for (const item of res.value as any[]) {
-      children.push({ id: item.id, name: item.name ?? item.id });
+      children.push({ id: item.id, name: item.name ?? item.id, size: Number(item.size ?? 0) });
     }
     url = res["@odata.nextLink"];
   }

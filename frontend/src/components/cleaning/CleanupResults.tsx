@@ -11,7 +11,7 @@ import {
 } from "../../api/cleaning";
 import { ApiClientError } from "../../api/client";
 import { PageFooter } from "./DiscoveryTable";
-import { formatDate } from "../../utils/format";
+import { formatBytes, formatDate } from "../../utils/format";
 
 const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
@@ -110,6 +110,12 @@ export function CleanupResultsView({ operationId, onDone, onRetried }: { operati
                 <>
                   {" "}
                   · Files removed: <span className="font-medium text-slate-800">{summary.filesCompleted.toLocaleString()}</span>
+                </>
+              )}
+              {summary.bytesCleared > 0 && (
+                <>
+                  {" "}
+                  · Data cleared: <span className="font-medium text-slate-800">{formatBytes(summary.bytesCleared)}</span>
                 </>
               )}
             </p>

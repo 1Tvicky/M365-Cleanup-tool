@@ -62,11 +62,10 @@ async function executeItem(
   // Seed one row per file up front — so the report/live "recently removed" feed reflects the full
   // file list from the start, not just the ones that have finished so far.
   for (const child of children) {
-    await query(`INSERT INTO cleanup_operation_item_files (cleanup_operation_item_id, file_name, graph_item_id) VALUES ($1, $2, $3)`, [
-      item.id,
-      child.name,
-      child.id,
-    ]);
+    await query(
+      `INSERT INTO cleanup_operation_item_files (cleanup_operation_item_id, file_name, graph_item_id, file_size_bytes) VALUES ($1, $2, $3, $4)`,
+      [item.id, child.name, child.id, child.size]
+    );
   }
   await query(`UPDATE cleanup_operation_items SET files_total = $2 WHERE id = $1`, [item.id, children.length]);
 

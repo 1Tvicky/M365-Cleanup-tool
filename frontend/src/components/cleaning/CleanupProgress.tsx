@@ -7,7 +7,7 @@ import {
   type CleanupRecentFile,
 } from "../../api/cleaning";
 import { ApiClientError } from "../../api/client";
-import { formatDate } from "../../utils/format";
+import { formatBytes, formatDate } from "../../utils/format";
 
 const TERMINAL_STATUSES = new Set(["completed", "completed_with_errors", "failed", "cancelled"]);
 
@@ -121,6 +121,14 @@ export function CleanupProgressView({ operationId, onFinished }: { operationId: 
               <span>Files removed</span>
               <span>
                 {progress.filesCompleted.toLocaleString()} / {progress.filesTotal.toLocaleString()}
+              </span>
+            </div>
+          )}
+          {progress.bytesTotal > 0 && (
+            <div className="flex items-center justify-between text-sm text-slate-600">
+              <span>Data cleared</span>
+              <span>
+                {formatBytes(progress.bytesCleared)} / {formatBytes(progress.bytesTotal)}
               </span>
             </div>
           )}
