@@ -3,11 +3,17 @@ import { query } from "../db/pool.js";
 import { graphClientForTenant } from "../graph/client.js";
 import {
   classifyDeleteError,
+  deleteCalendarEvent,
+  deleteContact,
   deleteDriveItem,
   deleteMessage,
+  listCalendarEvents,
   listDriveRootChildren,
+  listFolderContacts,
   listFolderMessages,
   listMailFoldersRecursive,
+  listUserCalendars,
+  listUserContactFoldersRecursive,
   type DriveOwnerKind,
 } from "../graph/cleanupDeletion.js";
 import { runThrottled } from "../services/rateLimiter.js";
@@ -51,7 +57,7 @@ async function isCancelled(operationId: string): Promise<boolean> {
 interface PendingItem {
   id: string;
   connection_id: string;
-  resource_type: "onedrive_account" | "sharepoint_site" | "outlook_mailbox";
+  resource_type: "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "outlook_calendar" | "outlook_contacts";
   graph_ref: { userId?: string; siteId?: string };
 }
 
@@ -148,9 +154,107 @@ async function executeMailboxItem(
   if (firstError) throw firstError;
 }
 
-/** Routes a pending item to the execution path for its resource type — executeItem only ever handles onedrive_account/sharepoint_site, so outlook_mailbox must be dispatched here rather than into it. */
+/**
+ * Deletes every event across every calendar the user owns — never the calendars themselves. Own
+ * function, own Graph calls, deliberately not merged with executeMailboxItem — see the Outlook
+ * isolation note in docs/azure-ad-app-registration.md.
+ */
+async function executeCalendarItem(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  item: PendingItem,
+  operationId: string
+): Promise<void> {
+  const userId = item.graph_ref.userId!;
+
+  const calendarIds = await listUserCalendars(client, userId);
+  const events: { id: string; subject: string }[] = [];
+  for (const calendarId of calendarIds) {
+    events.push(...(await listCalendarEvents(client, userId, calendarId)));
+  }
+  if (events.length === 0) return; // already empty — nothing to do, counts as success
+
+  for (const event of events) {
+    await query(
+      `INSERT INTO cleanup_operation_item_files (cleanup_operation_item_id, file_name, graph_item_id, file_size_bytes) VALUES ($1, $2, $3, $4)`,
+      [item.id, event.subject, event.id, 0] // events carry no reliable size field
+    );
+  }
+  await query(`UPDATE cleanup_operation_items SET files_total = $2 WHERE id = $1`, [item.id, events.length]);
+
+  let firstError: unknown = null;
+  await runThrottled(events, (event) => deleteCalendarEvent(client, userId, event.id), {
+    isCancelled: () => isCancelled(operationId),
+    label: "Outlook-Calendar",
+    batchSize: 10,
+    onItemSettled: async (event, result) => {
+      const fileStatus = result.ok ? result.value : "failed";
+      const errorMessage = result.ok ? null : classifyDeleteError(result.error).message;
+      await query(
+        `UPDATE cleanup_operation_item_files SET status = $3, error_message = $4, completed_at = now()
+         WHERE cleanup_operation_item_id = $1 AND graph_item_id = $2`,
+        [item.id, event.id, fileStatus, errorMessage]
+      );
+      await query(`UPDATE cleanup_operation_items SET files_completed = files_completed + 1 WHERE id = $1`, [item.id]);
+      if (!result.ok && !firstError) firstError = result.error;
+    },
+  });
+  if (firstError) throw firstError;
+}
+
+/**
+ * Deletes every contact across every contact folder the user has (plus the root "Contacts"
+ * collection) — never the folders themselves. Own function, own Graph calls, deliberately not
+ * merged with executeMailboxItem/executeCalendarItem.
+ */
+async function executeContactItem(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  item: PendingItem,
+  operationId: string
+): Promise<void> {
+  const userId = item.graph_ref.userId!;
+
+  const folderIds = await listUserContactFoldersRecursive(client, userId);
+  const contacts: { id: string; displayName: string }[] = [];
+  contacts.push(...(await listFolderContacts(client, userId, null))); // root "Contacts" collection
+  for (const folderId of folderIds) {
+    contacts.push(...(await listFolderContacts(client, userId, folderId)));
+  }
+  if (contacts.length === 0) return; // already empty — nothing to do, counts as success
+
+  for (const contact of contacts) {
+    await query(
+      `INSERT INTO cleanup_operation_item_files (cleanup_operation_item_id, file_name, graph_item_id, file_size_bytes) VALUES ($1, $2, $3, $4)`,
+      [item.id, contact.displayName, contact.id, 0] // contacts carry no reliable size field
+    );
+  }
+  await query(`UPDATE cleanup_operation_items SET files_total = $2 WHERE id = $1`, [item.id, contacts.length]);
+
+  let firstError: unknown = null;
+  await runThrottled(contacts, (contact) => deleteContact(client, userId, contact.id), {
+    isCancelled: () => isCancelled(operationId),
+    label: "Outlook-Contacts",
+    batchSize: 10,
+    onItemSettled: async (contact, result) => {
+      const fileStatus = result.ok ? result.value : "failed";
+      const errorMessage = result.ok ? null : classifyDeleteError(result.error).message;
+      await query(
+        `UPDATE cleanup_operation_item_files SET status = $3, error_message = $4, completed_at = now()
+         WHERE cleanup_operation_item_id = $1 AND graph_item_id = $2`,
+        [item.id, contact.id, fileStatus, errorMessage]
+      );
+      await query(`UPDATE cleanup_operation_items SET files_completed = files_completed + 1 WHERE id = $1`, [item.id]);
+      if (!result.ok && !firstError) firstError = result.error;
+    },
+  });
+  if (firstError) throw firstError;
+}
+
+/** Routes a pending item to the execution path for its resource type — executeItem only ever handles onedrive_account/sharepoint_site, so Outlook's three resource kinds each get their own explicit branch here rather than a shared switch-by-parameter helper. */
 function executeAnyItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem, operationId: string): Promise<void> {
-  return item.resource_type === "outlook_mailbox" ? executeMailboxItem(client, item, operationId) : executeItem(client, item, operationId);
+  if (item.resource_type === "outlook_mailbox") return executeMailboxItem(client, item, operationId);
+  if (item.resource_type === "outlook_calendar") return executeCalendarItem(client, item, operationId);
+  if (item.resource_type === "outlook_contacts") return executeContactItem(client, item, operationId);
+  return executeItem(client, item, operationId);
 }
 
 export const cleanupExecutionWorker = new Worker(

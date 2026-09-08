@@ -101,6 +101,40 @@ export function listOutlookMailboxes(connectionId: string, opts: ListOpts = {}):
   return rawFetch(`/api/cleaning/connections/${connectionId}/outlook?${toQuery(opts)}`);
 }
 
+/** Own function, not a resource-parameterized variant of listOutlookMailboxes — same connection, different Graph resource kind (calendar events, not mail). */
+export function listOutlookCalendars(connectionId: string, opts: ListOpts = {}): Promise<{ calendars: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/outlook/calendar?${toQuery(opts)}`);
+}
+
+/** Own function, same reasoning as listOutlookCalendars above. */
+export function listOutlookContacts(connectionId: string, opts: ListOpts = {}): Promise<{ contacts: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/outlook/contacts?${toQuery(opts)}`);
+}
+
+export interface OutlookOverviewSubResource {
+  id: string;
+  itemCount: number;
+  status: "pending" | "synced" | "failed";
+}
+
+/** One row per mailbox with all three resources together — backs the unified Mail/Calendar/Contacts selection table. A read-only presentational join, not a resource-parameterized fetch — see the backend route's own comment. */
+export interface OutlookMailboxOverviewRow {
+  upn: string;
+  name: string;
+  // mail always exists — connection_users is the base table this view is built from, not a LEFT
+  // JOIN. calendar/contacts are null until that resource has synced for this user.
+  mail: OutlookOverviewSubResource;
+  calendar: OutlookOverviewSubResource | null;
+  contacts: OutlookOverviewSubResource | null;
+}
+
+export function listOutlookOverview(
+  connectionId: string,
+  opts: { search?: string; page?: number; pageSize?: number } = {}
+): Promise<{ mailboxes: OutlookMailboxOverviewRow[] } & PageResult<OutlookMailboxOverviewRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/outlook/overview?${toQuery(opts)}`);
+}
+
 export function getTeamsSummary(connectionId: string): Promise<CleaningTeamsSummary> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/teams/summary`);
 }
@@ -123,26 +157,51 @@ export function calculateTeamsMessageCounts(connectionId: string): Promise<{ sta
  * delete Teams channel or chat messages, so 'channel'/'chat' items always resolve to 'unsupported',
  * never a faked success. See the cleanup-execution plan for the full rationale.
  */
-export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "channel" | "chat";
+export type CleanupResourceType =
+  | "onedrive_account"
+  | "sharepoint_site"
+  | "outlook_mailbox"
+  | "outlook_calendar"
+  | "outlook_contacts"
+  | "channel"
+  | "chat";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 
-/** ids reference the same internal row ids already used by the existing selection Maps (connection_users.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
+/** ids reference the same internal row ids already used by the existing selection Maps (connection_users.id / connection_outlook_calendars.id / connection_outlook_contacts.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
 export interface CleanupManifest {
   oneDrive?: { connectionId: string; ids: string[] };
   sharePoint?: { connectionId: string; ids: string[] };
   outlook?: { connectionId: string; ids: string[] };
+  outlookCalendar?: { connectionId: string; ids: string[] };
+  outlookContacts?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
   valid: boolean;
-  summary: { oneDriveAccounts: number; sharePointSites: number; outlookMailboxes: number; channels: number; chats: number };
+  summary: {
+    oneDriveAccounts: number;
+    sharePointSites: number;
+    outlookMailboxes: number;
+    outlookCalendars: number;
+    outlookContacts: number;
+    channels: number;
+    chats: number;
+  };
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
   /** Ids from the submitted manifest that resolved successfully, grouped by slot — used to reconcile a selection after a sync (drop ids no longer found). */
-  foundIds: { oneDrive: string[]; sharePoint: string[]; outlook: string[]; channels: string[]; chats: string[] };
+  foundIds: {
+    oneDrive: string[];
+    sharePoint: string[];
+    outlook: string[];
+    outlookCalendar: string[];
+    outlookContacts: string[];
+    channels: string[];
+    chats: string[];
+  };
 }
 
 export interface CleanupOperationRow {
@@ -176,6 +235,9 @@ export interface CleanupOperationItemRow {
   completedAt: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** filesCompleted is "settled" (succeeded or failed), not "succeeded" — 0/0 until file enumeration for this item has started. */
+  filesTotal: number;
+  filesCompleted: number;
 }
 
 export interface CleanupProgress extends CleanupOperationRow {
@@ -210,24 +272,61 @@ export function getCleanupProgress(operationId: string): Promise<CleanupProgress
 
 /** Paginated list of this operator's tenant's cleanup operations, newest first — powers the Reports page. */
 export function listCleanupOperations(
-  opts: { status?: CleanupOperationStatus; page?: number; pageSize?: number } = {}
+  opts: { status?: CleanupOperationStatus; search?: string; page?: number; pageSize?: number } = {}
 ): Promise<{ operations: CleanupOperationRow[] } & PageResult<CleanupOperationRow>> {
   const params = new URLSearchParams();
   if (opts.status) params.set("status", opts.status);
+  if (opts.search) params.set("search", opts.search);
   params.set("page", String(opts.page ?? 1));
   params.set("pageSize", String(opts.pageSize ?? 20));
   return rawFetch(`/api/cleaning/cleanup/operations?${params.toString()}`);
 }
 
+/** Aggregate totals across every operation this operator can see — backs the Reports page's top stat strip. */
+export interface CleanupOperationsSummary {
+  totalOperations: number;
+  processedItems: number;
+  totalItems: number;
+  bytesCleared: number;
+  bytesTotal: number;
+  updatedAt: string;
+}
+
+export function getCleanupOperationsSummary(): Promise<CleanupOperationsSummary> {
+  return rawFetch(`/api/cleaning/cleanup/operations/summary`);
+}
+
 export function getCleanupOperationItems(
   operationId: string,
-  opts: { status?: CleanupItemStatus; page?: number; pageSize?: number } = {}
+  opts: { status?: CleanupItemStatus; resourceType?: CleanupResourceType; page?: number; pageSize?: number } = {}
 ): Promise<{ items: CleanupOperationItemRow[] } & PageResult<CleanupOperationItemRow>> {
   const params = new URLSearchParams();
   if (opts.status) params.set("status", opts.status);
+  if (opts.resourceType) params.set("resourceType", opts.resourceType);
   params.set("page", String(opts.page ?? 1));
   params.set("pageSize", String(opts.pageSize ?? 20));
   return rawFetch(`/api/cleaning/cleanup/${operationId}/items?${params.toString()}`);
+}
+
+/** One item's file list — the third drill-down level (operation → item → file) on the progress/results screens. */
+export interface CleanupItemFileRow {
+  id: string;
+  fileName: string;
+  status: "pending" | "deleted" | "already_gone" | "failed";
+  fileSizeBytes: number;
+  errorMessage: string | null;
+  completedAt: string | null;
+}
+
+export function getCleanupOperationItemFiles(
+  operationId: string,
+  itemId: string,
+  opts: { page?: number; pageSize?: number } = {}
+): Promise<{ files: CleanupItemFileRow[] } & PageResult<CleanupItemFileRow>> {
+  const params = new URLSearchParams();
+  params.set("page", String(opts.page ?? 1));
+  params.set("pageSize", String(opts.pageSize ?? 20));
+  return rawFetch(`/api/cleaning/cleanup/${operationId}/items/${itemId}/files?${params.toString()}`);
 }
 
 export function cancelCleanup(operationId: string): Promise<{ status: "cancel_requested" }> {

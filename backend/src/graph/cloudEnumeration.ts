@@ -95,6 +95,112 @@ export async function getUserMailSummary(client: Client, userId: string): Promis
   }
 }
 
+export interface CalendarSummary {
+  itemCount: number;
+}
+
+/**
+ * Deliberately separate from getUserMailSummary — its own Graph calls, its own function, never a
+ * shared "which resource" helper (see docs/azure-ad-app-registration.md's Outlook isolation note).
+ *
+ * GET /users/{id}/events only returns the *default* calendar's events — a mailbox with secondary or
+ * shared calendars would silently undercount. So this enumerates every calendar the user owns first
+ * (/users/{id}/calendars, which per Graph's documented behavior already includes calendars in every
+ * calendar group — no separate /calendarGroups traversal needed) and sums each one's event count.
+ *
+ * Filtered to canEdit=true: confirmed live that Graph's own auto-generated per-user calendars
+ * ("Birthdays", "United States holidays" — owned by the user but canEdit=false) reject event
+ * deletion with "Read-only calendars can't be modified." Counting their events here would promise a
+ * cleanup that execution can never actually perform, the same way Mail never counts a distinguished
+ * folder as if it could be deleted.
+ */
+export async function getUserCalendarEventCount(client: Client, userId: string): Promise<CalendarSummary | null> {
+  try {
+    const calendarIds: string[] = [];
+    let calUrl: string | undefined = `/users/${userId}/calendars?$select=id,canEdit&$top=100`;
+    while (calUrl) {
+      const res: any = await client.api(calUrl).get();
+      for (const cal of res.value as any[]) if (cal.canEdit) calendarIds.push(cal.id);
+      calUrl = res["@odata.nextLink"];
+    }
+
+    let itemCount = 0;
+    for (const calendarId of calendarIds) {
+      let url: string | undefined = `/users/${userId}/calendars/${calendarId}/events?$select=id&$top=999`;
+      while (url) {
+        const res: any = await client.api(url).get();
+        itemCount += (res.value as any[]).length;
+        url = res["@odata.nextLink"];
+      }
+    }
+    return { itemCount };
+  } catch (err) {
+    // No mailbox provisioned for this user — same rationale as getUserMailSummary.
+    if ((err as { statusCode?: number })?.statusCode === 404) return null;
+    throw err;
+  }
+}
+
+export interface ContactSummary {
+  itemCount: number;
+}
+
+/**
+ * Deliberately separate from getUserMailSummary/getUserCalendarEventCount — own Graph calls, own
+ * function. Contact folders nest (like mail folders), so this BFS-walks /contactFolders +
+ * /childFolders the same shape as graph/cleanupDeletion.ts's listMailFoldersRecursive, plus the
+ * implicit root "Contacts" folder (contacts with no folder, reachable only via /users/{id}/contacts
+ * directly — there is no folder id for it).
+ */
+export async function getUserContactCount(client: Client, userId: string): Promise<ContactSummary | null> {
+  try {
+    let itemCount = 0;
+
+    // Root contacts (no folder).
+    let rootUrl: string | undefined = `/users/${userId}/contacts?$select=id&$top=999`;
+    while (rootUrl) {
+      const res: any = await client.api(rootUrl).get();
+      itemCount += (res.value as any[]).length;
+      rootUrl = res["@odata.nextLink"];
+    }
+
+    // Every contact folder, at every depth.
+    const folderIds: string[] = [];
+    let queue: string[] = [];
+    let topUrl: string | undefined = `/users/${userId}/contactFolders?$select=id&$top=100`;
+    while (topUrl) {
+      const res: any = await client.api(topUrl).get();
+      for (const folder of res.value as any[]) queue.push(folder.id);
+      topUrl = res["@odata.nextLink"];
+    }
+    while (queue.length > 0) {
+      const folderId = queue.shift()!;
+      folderIds.push(folderId);
+      let childUrl: string | undefined = `/users/${userId}/contactFolders/${folderId}/childFolders?$select=id&$top=100`;
+      while (childUrl) {
+        const res: any = await client.api(childUrl).get();
+        for (const folder of res.value as any[]) queue.push(folder.id);
+        childUrl = res["@odata.nextLink"];
+      }
+    }
+
+    for (const folderId of folderIds) {
+      let url: string | undefined = `/users/${userId}/contactFolders/${folderId}/contacts?$select=id&$top=999`;
+      while (url) {
+        const res: any = await client.api(url).get();
+        itemCount += (res.value as any[]).length;
+        url = res["@odata.nextLink"];
+      }
+    }
+
+    return { itemCount };
+  } catch (err) {
+    // No mailbox provisioned for this user — same rationale as getUserMailSummary.
+    if ((err as { statusCode?: number })?.statusCode === 404) return null;
+    throw err;
+  }
+}
+
 export interface SiteSummary {
   id: string;
   webUrl: string;

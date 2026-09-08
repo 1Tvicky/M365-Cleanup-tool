@@ -122,13 +122,41 @@ export interface MailMessage {
   size: number;
 }
 
+/**
+ * Some Exchange Online backends (confirmed live on at least one real tenant) don't expose `size`
+ * on message objects at all — not "it's 0", the property genuinely isn't returned even with no
+ * $select restriction — and requesting it in $select makes Graph reject the *entire* query with
+ * `400 Could not find a property named 'size' on type 'Microsoft.OutlookServices.Message'`. Left
+ * unhandled, that 400 kills mail cleanup for every message in every folder for that mailbox. So
+ * this asks for `size` first (the common case — real byte reporting), and only on that exact error
+ * falls back to a `size`-free query for the rest of this folder, reporting 0 for its messages
+ * rather than failing the whole mailbox.
+ */
+function isMissingSizePropertyError(err: unknown): boolean {
+  const status = (err as { statusCode?: number })?.statusCode;
+  const message = String((err as { message?: string })?.message ?? "");
+  return status === 400 && /property named 'size'/i.test(message);
+}
+
 /** Messages directly in one folder (not its child folders — those are separate entries from listMailFoldersRecursive, walked independently). */
 export async function listFolderMessages(client: Client, userId: string, folderId: string): Promise<MailMessage[]> {
   const messages: MailMessage[] = [];
-  let url: string | undefined = `/users/${userId}/mailFolders/${folderId}/messages?$select=id,subject,size&$top=200`;
+  const basePath = `/users/${userId}/mailFolders/${folderId}/messages`;
+  let url: string | undefined = `${basePath}?$select=id,subject,size&$top=200`;
+  let sizeSupported = true;
 
   while (url) {
-    const res: any = await client.api(url).get();
+    let res: any;
+    try {
+      res = await client.api(url).get();
+    } catch (err) {
+      if (sizeSupported && isMissingSizePropertyError(err)) {
+        sizeSupported = false;
+        url = `${basePath}?$select=id,subject&$top=200`;
+        continue;
+      }
+      throw err;
+    }
     for (const m of res.value as any[]) {
       messages.push({ id: m.id, subject: m.subject || "(no subject)", size: Number(m.size ?? 0) });
     }
@@ -141,6 +169,134 @@ export async function listFolderMessages(client: Client, userId: string, folderI
 export async function deleteMessage(client: Client, userId: string, messageId: string): Promise<DriveItemDeleteResult> {
   try {
     await client.api(`/users/${userId}/messages/${messageId}`).delete();
+    return "deleted";
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    throw err;
+  }
+}
+
+/**
+ * Outlook calendar. Deliberately separate functions from the Mail ones above — own Graph paths,
+ * never a shared "which resource" helper (see the Outlook isolation note in
+ * docs/azure-ad-app-registration.md).
+ *
+ * Unlike mail folders, a user's calendars don't nest and are never deleted here — only events
+ * inside them. A calendar's events are only reachable by first knowing which calendars exist
+ * (GET /users/{id}/events alone only covers the *default* calendar).
+ */
+
+/**
+ * Every calendar the user can actually delete events from — flat list, no recursion (Graph
+ * calendars don't nest under a user). Filtered to canEdit=true: confirmed live that Graph's own
+ * auto-generated per-user calendars ("Birthdays", "United States holidays" — owned by the user but
+ * canEdit=false) reject event deletion with "Read-only calendars can't be modified." Skipping them
+ * here (rather than attempting and always failing) mirrors how Mail never attempts to delete a
+ * distinguished folder — see graph/cloudEnumeration.ts's getUserCalendarEventCount for the matching
+ * filter on the discovery/summary side, so a selected mailbox's shown event count is only ever
+ * events this function can actually reach.
+ */
+export async function listUserCalendars(client: Client, userId: string): Promise<string[]> {
+  const calendarIds: string[] = [];
+  let url: string | undefined = `/users/${userId}/calendars?$select=id,canEdit&$top=100`;
+  while (url) {
+    const res: any = await client.api(url).get();
+    for (const cal of res.value as any[]) if (cal.canEdit) calendarIds.push(cal.id);
+    url = res["@odata.nextLink"];
+  }
+  return calendarIds;
+}
+
+export interface CalendarEvent {
+  id: string;
+  subject: string;
+}
+
+/** Events in one calendar. Graph's event objects carry no reliable size field (unlike mail/drive items), so there is no size to capture here. */
+export async function listCalendarEvents(client: Client, userId: string, calendarId: string): Promise<CalendarEvent[]> {
+  const events: CalendarEvent[] = [];
+  let url: string | undefined = `/users/${userId}/calendars/${calendarId}/events?$select=id,subject&$top=200`;
+  while (url) {
+    const res: any = await client.api(url).get();
+    for (const e of res.value as any[]) {
+      events.push({ id: e.id, subject: e.subject || "(no subject)" });
+    }
+    url = res["@odata.nextLink"];
+  }
+  return events;
+}
+
+/** Deletes one event. Event ids are addressable directly (no need to repeat the calendar id) — mirrors deleteMessage's 404-is-already-gone convention. Never deletes a calendar itself. */
+export async function deleteCalendarEvent(client: Client, userId: string, eventId: string): Promise<DriveItemDeleteResult> {
+  try {
+    await client.api(`/users/${userId}/events/${eventId}`).delete();
+    return "deleted";
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    throw err;
+  }
+}
+
+/**
+ * Outlook contacts. Deliberately separate functions again — own Graph paths, own module-level
+ * concerns, never shared with the Mail or Calendar functions above via a parameter.
+ *
+ * Contact folders nest (unlike calendars), so this mirrors listMailFoldersRecursive's BFS shape.
+ * Contacts with no folder live directly under /users/{id}/contacts — represented here as a `null`
+ * folderId, not a real folder, since there is no folder object to ever protect from deletion there.
+ */
+
+/** Every contact folder id, at every depth — BFS over childFolders. Folders are never deleted, only listed. */
+export async function listUserContactFoldersRecursive(client: Client, userId: string): Promise<string[]> {
+  const folderIds: string[] = [];
+  let queue: string[] = [];
+
+  let url: string | undefined = `/users/${userId}/contactFolders?$select=id&$top=100`;
+  while (url) {
+    const res: any = await client.api(url).get();
+    for (const folder of res.value as any[]) queue.push(folder.id);
+    url = res["@odata.nextLink"];
+  }
+
+  while (queue.length > 0) {
+    const folderId = queue.shift()!;
+    folderIds.push(folderId);
+    let childUrl: string | undefined = `/users/${userId}/contactFolders/${folderId}/childFolders?$select=id&$top=100`;
+    while (childUrl) {
+      const res: any = await client.api(childUrl).get();
+      for (const folder of res.value as any[]) queue.push(folder.id);
+      childUrl = res["@odata.nextLink"];
+    }
+  }
+  return folderIds;
+}
+
+export interface Contact {
+  id: string;
+  displayName: string;
+}
+
+/** Contacts directly in one folder, or the root "Contacts" collection when folderId is null. */
+export async function listFolderContacts(client: Client, userId: string, folderId: string | null): Promise<Contact[]> {
+  const contacts: Contact[] = [];
+  let url: string | undefined =
+    folderId === null
+      ? `/users/${userId}/contacts?$select=id,displayName&$top=200`
+      : `/users/${userId}/contactFolders/${folderId}/contacts?$select=id,displayName&$top=200`;
+  while (url) {
+    const res: any = await client.api(url).get();
+    for (const c of res.value as any[]) {
+      contacts.push({ id: c.id, displayName: c.displayName || "(no name)" });
+    }
+    url = res["@odata.nextLink"];
+  }
+  return contacts;
+}
+
+/** Deletes one contact. Same 404-is-already-gone idempotency convention as deleteMessage/deleteCalendarEvent. Never deletes a contact folder. */
+export async function deleteContact(client: Client, userId: string, contactId: string): Promise<DriveItemDeleteResult> {
+  try {
+    await client.api(`/users/${userId}/contacts/${contactId}`).delete();
     return "deleted";
   } catch (err) {
     if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";

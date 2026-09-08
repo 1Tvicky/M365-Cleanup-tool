@@ -139,7 +139,12 @@ export default function App() {
   }
 
   return (
-    <div className="flex min-h-screen">
+    // h-screen, not min-h-screen: this must be capped at exactly the viewport height, not just a
+    // minimum, or a flex child can't be told to stretch to a bounded height either — without that
+    // cap, <main>'s overflow-y-auto never actually triggers (its own height just keeps growing to
+    // fit content instead), so a tall page (e.g. Reports with many rows) scrolls the whole
+    // document, dragging the sidebar along with it instead of leaving it pinned.
+    <div className="flex h-screen">
       <SideNav active={page} onNavigate={handleNavigate} onLogout={handleLogout} />
       <main className="flex-1 overflow-y-auto">
         {page === "clouds" && <CloudsPage operator={operator} onLogout={handleLogout} />}

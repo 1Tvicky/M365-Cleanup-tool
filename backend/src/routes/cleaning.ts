@@ -16,6 +16,7 @@ import type {
   CleaningSyncOperation,
   CleaningSyncResourceStatus,
   CleaningTeamsSummary,
+  CleanupItemFileRow,
   CleanupManifest,
   CleanupOperationItemRow,
   CleanupOperationRow,
@@ -214,6 +215,193 @@ cleaningRouter.get(
     await requireConnectionAccess(req.params.id!, req.session!.operatorId, "outlook");
     const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
     res.json({ mailboxes: rows, total, page, pageSize });
+  })
+);
+
+/**
+ * Reads connection_outlook_calendars — its own dedicated query, not a reuse/generalization of
+ * listCleaningResources (which is hardcoded to connection_users), per the no-shared-Outlook-helper
+ * rule. Same connection-type gate as the Mail route above: this is a resource view within the same
+ * Outlook connection, not a different cloud type.
+ */
+async function listOutlookCalendarSummaries(
+  connectionId: string,
+  opts: { search: string | null; sort: "storage" | "name"; page: number; pageSize: number }
+): Promise<PageResult<CleaningResourceRow>> {
+  const searchClause = `($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')`;
+
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) FROM connection_outlook_calendars WHERE connection_id = $1 AND ${searchClause}`,
+    [connectionId, opts.search]
+  );
+  const total = Number(countResult.rows[0]!.count);
+
+  const result = await query<{
+    id: string;
+    display_name: string | null;
+    upn: string;
+    storage_used_bytes: string;
+    item_count: number;
+    sync_status: string;
+  }>(
+    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status
+     FROM connection_outlook_calendars
+     WHERE connection_id = $1 AND ${searchClause}
+     ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
+     LIMIT $3 OFFSET $4`,
+    [connectionId, opts.search, opts.pageSize, (opts.page - 1) * opts.pageSize]
+  );
+
+  const rows: CleaningResourceRow[] = result.rows.map((r) => ({
+    id: r.id,
+    name: r.display_name ?? r.upn,
+    detail: r.upn,
+    storageUsedBytes: Number(r.storage_used_bytes),
+    itemCount: r.item_count,
+    status: r.sync_status as CleaningResourceRow["status"],
+  }));
+
+  return { rows, total, page: opts.page, pageSize: opts.pageSize };
+}
+
+cleaningRouter.get(
+  "/connections/:id/outlook/calendar",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "outlook");
+    const { rows, total, page, pageSize } = await listOutlookCalendarSummaries(req.params.id!, parsePageQuery(req));
+    res.json({ calendars: rows, total, page, pageSize });
+  })
+);
+
+/** Same shape as listOutlookCalendarSummaries above, targeting connection_outlook_contacts — its own dedicated query, not shared with it. */
+async function listOutlookContactSummaries(
+  connectionId: string,
+  opts: { search: string | null; sort: "storage" | "name"; page: number; pageSize: number }
+): Promise<PageResult<CleaningResourceRow>> {
+  const searchClause = `($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')`;
+
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) FROM connection_outlook_contacts WHERE connection_id = $1 AND ${searchClause}`,
+    [connectionId, opts.search]
+  );
+  const total = Number(countResult.rows[0]!.count);
+
+  const result = await query<{
+    id: string;
+    display_name: string | null;
+    upn: string;
+    storage_used_bytes: string;
+    item_count: number;
+    sync_status: string;
+  }>(
+    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status
+     FROM connection_outlook_contacts
+     WHERE connection_id = $1 AND ${searchClause}
+     ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
+     LIMIT $3 OFFSET $4`,
+    [connectionId, opts.search, opts.pageSize, (opts.page - 1) * opts.pageSize]
+  );
+
+  const rows: CleaningResourceRow[] = result.rows.map((r) => ({
+    id: r.id,
+    name: r.display_name ?? r.upn,
+    detail: r.upn,
+    storageUsedBytes: Number(r.storage_used_bytes),
+    itemCount: r.item_count,
+    status: r.sync_status as CleaningResourceRow["status"],
+  }));
+
+  return { rows, total, page: opts.page, pageSize: opts.pageSize };
+}
+
+cleaningRouter.get(
+  "/connections/:id/outlook/contacts",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "outlook");
+    const { rows, total, page, pageSize } = await listOutlookContactSummaries(req.params.id!, parsePageQuery(req));
+    res.json({ contacts: rows, total, page, pageSize });
+  })
+);
+
+/**
+ * GET /connections/:id/outlook/overview — one row per mailbox with all three resources' counts
+ * together, purely for the selection table (letting a user tick Mail/Calendar/Contacts
+ * independently per mailbox from one list instead of three separate tables). This is a read-only
+ * SQL join for display only — it never calls Graph and is not part of the discovery, manifest, or
+ * execution path, all of which stay three fully separate resource types (see the outlook/mail,
+ * outlook/calendar, outlook/contacts routes and resolveManifestItems below, all unchanged). Do not
+ * extend this into a generic cross-resource helper for anything beyond rendering this one table.
+ */
+interface OutlookOverviewSubResource {
+  id: string;
+  itemCount: number;
+  status: "pending" | "synced" | "failed";
+}
+
+async function listOutlookOverview(
+  connectionId: string,
+  opts: { search: string | null; page: number; pageSize: number }
+): Promise<
+  PageResult<{
+    upn: string;
+    name: string;
+    mail: OutlookOverviewSubResource;
+    calendar: OutlookOverviewSubResource | null;
+    contacts: OutlookOverviewSubResource | null;
+  }>
+> {
+  const searchClause = `($2::text IS NULL OR cu.upn ILIKE '%' || $2 || '%' OR cu.display_name ILIKE '%' || $2 || '%')`;
+
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) FROM connection_users cu WHERE cu.connection_id = $1 AND ${searchClause}`,
+    [connectionId, opts.search]
+  );
+  const total = Number(countResult.rows[0]!.count);
+
+  const result = await query<{
+    upn: string;
+    display_name: string | null;
+    mail_id: string;
+    mail_items: number;
+    mail_status: OutlookOverviewSubResource["status"];
+    calendar_id: string | null;
+    calendar_events: number | null;
+    calendar_status: OutlookOverviewSubResource["status"] | null;
+    contacts_id: string | null;
+    contact_count: number | null;
+    contacts_status: OutlookOverviewSubResource["status"] | null;
+  }>(
+    `SELECT cu.upn, cu.display_name,
+            cu.id AS mail_id, cu.item_count AS mail_items, cu.sync_status AS mail_status,
+            cal.id AS calendar_id, cal.item_count AS calendar_events, cal.sync_status AS calendar_status,
+            con.id AS contacts_id, con.item_count AS contact_count, con.sync_status AS contacts_status
+     FROM connection_users cu
+     LEFT JOIN connection_outlook_calendars cal ON cal.connection_id = cu.connection_id AND cal.graph_user_id = cu.graph_user_id
+     LEFT JOIN connection_outlook_contacts con ON con.connection_id = cu.connection_id AND con.graph_user_id = cu.graph_user_id
+     WHERE cu.connection_id = $1 AND ${searchClause}
+     ORDER BY COALESCE(cu.display_name, cu.upn), cu.id
+     LIMIT $3 OFFSET $4`,
+    [connectionId, opts.search, opts.pageSize, (opts.page - 1) * opts.pageSize]
+  );
+
+  const rows = result.rows.map((r) => ({
+    upn: r.upn,
+    name: r.display_name ?? r.upn,
+    mail: { id: r.mail_id, itemCount: r.mail_items, status: r.mail_status },
+    calendar: r.calendar_id ? { id: r.calendar_id, itemCount: r.calendar_events ?? 0, status: r.calendar_status! } : null,
+    contacts: r.contacts_id ? { id: r.contacts_id, itemCount: r.contact_count ?? 0, status: r.contacts_status! } : null,
+  }));
+
+  return { rows, total, page: opts.page, pageSize: opts.pageSize };
+}
+
+cleaningRouter.get(
+  "/connections/:id/outlook/overview",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "outlook");
+    const { search, page, pageSize } = parsePageQuery(req);
+    const { rows, total, page: p, pageSize: ps } = await listOutlookOverview(req.params.id!, { search, page, pageSize });
+    res.json({ mailboxes: rows, total, page: p, pageSize: ps });
   })
 );
 
@@ -432,6 +620,8 @@ const cleanupManifestSchema = z.object({
   oneDrive: manifestSlotSchema.optional(),
   sharePoint: manifestSlotSchema.optional(),
   outlook: manifestSlotSchema.optional(),
+  outlookCalendar: manifestSlotSchema.optional(),
+  outlookContacts: manifestSlotSchema.optional(),
   channels: manifestSlotSchema.optional(),
   chats: manifestSlotSchema.optional(),
 });
@@ -455,6 +645,8 @@ async function resolveManifestTenant(manifest: CleanupManifest, operatorId: stri
         manifest.oneDrive?.connectionId,
         manifest.sharePoint?.connectionId,
         manifest.outlook?.connectionId,
+        manifest.outlookCalendar?.connectionId,
+        manifest.outlookContacts?.connectionId,
         manifest.channels?.connectionId,
         manifest.chats?.connectionId,
       ].filter((id): id is string => Boolean(id))
@@ -503,7 +695,15 @@ async function resolveManifestItems(
 ): Promise<{ items: ResolvedManifestItem[]; errors: string[]; foundIds: CleanupValidationResult["foundIds"] }> {
   const items: ResolvedManifestItem[] = [];
   const errors: string[] = [];
-  const foundIds: CleanupValidationResult["foundIds"] = { oneDrive: [], sharePoint: [], outlook: [], channels: [], chats: [] };
+  const foundIds: CleanupValidationResult["foundIds"] = {
+    oneDrive: [],
+    sharePoint: [],
+    outlook: [],
+    outlookCalendar: [],
+    outlookContacts: [],
+    channels: [],
+    chats: [],
+  };
 
   if (manifest.oneDrive) {
     await requireConnectionAccess(manifest.oneDrive.connectionId, operatorId, "onedrive");
@@ -581,6 +781,59 @@ async function resolveManifestItems(
     }
   }
 
+  // Deliberately its own block, not folded into the manifest.outlook block above — same connection
+  // type ("outlook"), different resource table/resourceType, per the no-shared-Outlook-helper rule.
+  if (manifest.outlookCalendar) {
+    await requireConnectionAccess(manifest.outlookCalendar.connectionId, operatorId, "outlook");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
+      `SELECT id, display_name, upn, graph_user_id FROM connection_outlook_calendars WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.outlookCalendar.connectionId, manifest.outlookCalendar.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.outlookCalendar.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Outlook calendar is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.outlookCalendar.connectionId,
+        resourceType: "outlook_calendar",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        graphRef: { userId: row.graph_user_id },
+        supported: true,
+      });
+      foundIds.outlookCalendar.push(row.id);
+    }
+  }
+
+  // Same reasoning as the outlookCalendar block above — its own block, own table, own resourceType.
+  if (manifest.outlookContacts) {
+    await requireConnectionAccess(manifest.outlookContacts.connectionId, operatorId, "outlook");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
+      `SELECT id, display_name, upn, graph_user_id FROM connection_outlook_contacts WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.outlookContacts.connectionId, manifest.outlookContacts.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.outlookContacts.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Outlook contacts mailbox is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.outlookContacts.connectionId,
+        resourceType: "outlook_contacts",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        graphRef: { userId: row.graph_user_id },
+        supported: true,
+      });
+      foundIds.outlookContacts.push(row.id);
+    }
+  }
+
   if (manifest.channels) {
     await requireConnectionAccess(manifest.channels.connectionId, operatorId, "teams");
     const result = await db.query<{ id: string; team_id: string; team_name: string; channel_id: string; channel_name: string }>(
@@ -642,6 +895,8 @@ function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult[
     oneDriveAccounts: items.filter((i) => i.resourceType === "onedrive_account").length,
     sharePointSites: items.filter((i) => i.resourceType === "sharepoint_site").length,
     outlookMailboxes: items.filter((i) => i.resourceType === "outlook_mailbox").length,
+    outlookCalendars: items.filter((i) => i.resourceType === "outlook_calendar").length,
+    outlookContacts: items.filter((i) => i.resourceType === "outlook_contacts").length,
     channels: items.filter((i) => i.resourceType === "channel").length,
     chats: items.filter((i) => i.resourceType === "chat").length,
   };
@@ -865,39 +1120,59 @@ function toCleanupOperationRow(r: CleanupOperationSqlRow): CleanupOperationRow {
   };
 }
 
-const RESOURCE_TYPES: CleanupResourceType[] = ["onedrive_account", "sharepoint_site", "outlook_mailbox", "channel", "chat"];
+const RESOURCE_TYPES: CleanupResourceType[] = [
+  "onedrive_account",
+  "sharepoint_site",
+  "outlook_mailbox",
+  "outlook_calendar",
+  "outlook_contacts",
+  "channel",
+  "chat",
+];
 
 const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
   sharepoint_site: "SharePoint site",
   outlook_mailbox: "Outlook mailbox",
+  outlook_calendar: "Outlook calendar event",
+  outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message",
 };
 
-/** GET /api/cleaning/cleanup/operations — paginated list of this operator's tenant's cleanup operations, for the Reports page. Optional ?status= filter. */
+/** Matches an operation whose touched connections include one with a matching display_name — used by both the list and its count query, so the two never disagree on what "matches" means. */
+const OPERATION_SEARCH_CLAUSE = `(
+  $3::text IS NULL OR EXISTS (
+    SELECT 1 FROM cleanup_operation_items coi
+    JOIN connections c ON c.id = coi.connection_id
+    WHERE coi.cleanup_operation_id = co.id AND c.display_name ILIKE '%' || $3 || '%'
+  )
+)`;
+
+/** GET /api/cleaning/cleanup/operations — paginated list of this operator's tenant's cleanup operations, for the Reports page. Optional ?status= and ?search= (matches the same connection label shown as "Cleanup Name") filters. */
 cleaningRouter.get(
   "/cleanup/operations",
   asyncHandler(async (req, res) => {
     const { page, pageSize } = parsePageQuery(req);
     const statusFilter = typeof req.query.status === "string" ? req.query.status : null;
+    const searchFilter = typeof req.query.search === "string" && req.query.search.trim() ? req.query.search.trim() : null;
     const statusClause = `($2::text IS NULL OR co.status = $2)`;
 
     const countResult = await query<{ count: string }>(
       `SELECT COUNT(*) FROM cleanup_operations co
        JOIN tenant_roles tr ON tr.tenant_id = co.tenant_id AND tr.operator_id = $1
-       WHERE ${statusClause}`,
-      [req.session!.operatorId, statusFilter]
+       WHERE ${statusClause} AND ${OPERATION_SEARCH_CLAUSE}`,
+      [req.session!.operatorId, statusFilter, searchFilter]
     );
     const result = await query<CleanupOperationSqlRow>(
       `SELECT ${CLEANUP_OPERATION_SELECT}
        FROM cleanup_operations co
        JOIN tenant_roles tr ON tr.tenant_id = co.tenant_id AND tr.operator_id = $1
        LEFT JOIN operators o ON o.id = co.requested_by
-       WHERE ${statusClause}
+       WHERE ${statusClause} AND ${OPERATION_SEARCH_CLAUSE}
        ORDER BY co.created_at DESC
-       LIMIT $3 OFFSET $4`,
-      [req.session!.operatorId, statusFilter, pageSize, (page - 1) * pageSize]
+       LIMIT $4 OFFSET $5`,
+      [req.session!.operatorId, statusFilter, searchFilter, pageSize, (page - 1) * pageSize]
     );
 
     res.json({
@@ -905,6 +1180,45 @@ cleaningRouter.get(
       total: Number(countResult.rows[0]!.count),
       page,
       pageSize,
+    });
+  })
+);
+
+/** GET /api/cleaning/cleanup/operations/summary — aggregate totals across every operation this operator can see, for the Reports page's top stat strip. Same tenant_roles scoping as the list route — never aggregates across a tenant/operator the caller has no role on. */
+cleaningRouter.get(
+  "/cleanup/operations/summary",
+  asyncHandler(async (req, res) => {
+    const result = await query<{
+      total_operations: string;
+      processed_items: string;
+      total_items: string;
+      bytes_cleared: string;
+      bytes_total: string;
+    }>(
+      `SELECT COUNT(*) AS total_operations,
+              COALESCE(SUM(co.processed_items), 0) AS processed_items,
+              COALESCE(SUM(co.total_items), 0) AS total_items,
+              COALESCE(SUM(f.bytes_cleared), 0) AS bytes_cleared,
+              COALESCE(SUM(f.bytes_total), 0) AS bytes_total
+       FROM cleanup_operations co
+       JOIN tenant_roles tr ON tr.tenant_id = co.tenant_id AND tr.operator_id = $1
+       LEFT JOIN LATERAL (
+         SELECT SUM(cof.file_size_bytes) FILTER (WHERE cof.status IN ('deleted', 'already_gone')) AS bytes_cleared,
+                SUM(cof.file_size_bytes) AS bytes_total
+         FROM cleanup_operation_item_files cof
+         JOIN cleanup_operation_items coi ON coi.id = cof.cleanup_operation_item_id
+         WHERE coi.cleanup_operation_id = co.id
+       ) f ON true`,
+      [req.session!.operatorId]
+    );
+    const r = result.rows[0]!;
+    res.json({
+      totalOperations: Number(r.total_operations),
+      processedItems: Number(r.processed_items),
+      totalItems: Number(r.total_items),
+      bytesCleared: Number(r.bytes_cleared),
+      bytesTotal: Number(r.bytes_total),
+      updatedAt: new Date().toISOString(),
     });
   })
 );
@@ -1087,29 +1401,32 @@ cleaningRouter.get(
   })
 );
 
-/** GET /api/cleaning/cleanup/:operationId/items — paginated results table, optionally filtered by ?status=. */
+/** GET /api/cleaning/cleanup/:operationId/items — paginated results table, optionally filtered by ?status= and/or ?resourceType=. The resourceType filter backs the progress screen's "expand a category to see its items" drill-down. */
 cleaningRouter.get(
   "/cleanup/:operationId/items",
   asyncHandler(async (req, res) => {
     await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
     const { page, pageSize } = parsePageQuery(req);
     const statusFilter = typeof req.query.status === "string" ? req.query.status : null;
-    const statusClause = `($2::text IS NULL OR status = $2)`;
+    const resourceTypeFilter = typeof req.query.resourceType === "string" ? req.query.resourceType : null;
+    const filterClause = `($2::text IS NULL OR status = $2) AND ($3::text IS NULL OR resource_type = $3)`;
 
     const countResult = await query<{ count: string }>(
-      `SELECT COUNT(*) FROM cleanup_operation_items WHERE cleanup_operation_id = $1 AND ${statusClause}`,
-      [req.params.operationId, statusFilter]
+      `SELECT COUNT(*) FROM cleanup_operation_items WHERE cleanup_operation_id = $1 AND ${filterClause}`,
+      [req.params.operationId, statusFilter, resourceTypeFilter]
     );
     const result = await query<{
       id: string; connection_id: string; resource_type: CleanupResourceType; display_name: string; status: string;
       attempts: number; started_at: string | null; completed_at: string | null; error_code: string | null; error_message: string | null;
+      files_total: number; files_completed: number;
     }>(
-      `SELECT id, connection_id, resource_type, display_name, status, attempts, started_at, completed_at, error_code, error_message
+      `SELECT id, connection_id, resource_type, display_name, status, attempts, started_at, completed_at, error_code, error_message,
+              files_total, files_completed
        FROM cleanup_operation_items
-       WHERE cleanup_operation_id = $1 AND ${statusClause}
+       WHERE cleanup_operation_id = $1 AND ${filterClause}
        ORDER BY display_name, id
-       LIMIT $3 OFFSET $4`,
-      [req.params.operationId, statusFilter, pageSize, (page - 1) * pageSize]
+       LIMIT $4 OFFSET $5`,
+      [req.params.operationId, statusFilter, resourceTypeFilter, pageSize, (page - 1) * pageSize]
     );
 
     const items: CleanupOperationItemRow[] = result.rows.map((r) => ({
@@ -1123,8 +1440,48 @@ cleaningRouter.get(
       completedAt: r.completed_at,
       errorCode: r.error_code,
       errorMessage: r.error_message,
+      filesTotal: r.files_total,
+      filesCompleted: r.files_completed,
     }));
     res.json({ items, total: Number(countResult.rows[0]!.count), page, pageSize });
+  })
+);
+
+/** GET /api/cleaning/cleanup/:operationId/items/:itemId/files — one item's file list (the third drill-down level: operation → item → file). Joining on coi.cleanup_operation_id = $1 is what stops an itemId from a different operation being read through here. */
+cleaningRouter.get(
+  "/cleanup/:operationId/items/:itemId/files",
+  asyncHandler(async (req, res) => {
+    await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "viewer");
+    const { page, pageSize } = parsePageQuery(req);
+
+    const countResult = await query<{ count: string }>(
+      `SELECT COUNT(*)
+       FROM cleanup_operation_item_files cof
+       JOIN cleanup_operation_items coi ON coi.id = cof.cleanup_operation_item_id
+       WHERE coi.cleanup_operation_id = $1 AND coi.id = $2`,
+      [req.params.operationId, req.params.itemId]
+    );
+    const result = await query<{
+      id: string; file_name: string; status: string; file_size_bytes: string; error_message: string | null; completed_at: string | null;
+    }>(
+      `SELECT cof.id, cof.file_name, cof.status, cof.file_size_bytes, cof.error_message, cof.completed_at
+       FROM cleanup_operation_item_files cof
+       JOIN cleanup_operation_items coi ON coi.id = cof.cleanup_operation_item_id
+       WHERE coi.cleanup_operation_id = $1 AND coi.id = $2
+       ORDER BY cof.file_name, cof.id
+       LIMIT $3 OFFSET $4`,
+      [req.params.operationId, req.params.itemId, pageSize, (page - 1) * pageSize]
+    );
+
+    const files: CleanupItemFileRow[] = result.rows.map((r) => ({
+      id: r.id,
+      fileName: r.file_name,
+      status: r.status as CleanupItemFileRow["status"],
+      fileSizeBytes: Number(r.file_size_bytes),
+      errorMessage: r.error_message,
+      completedAt: r.completed_at,
+    }));
+    res.json({ files, total: Number(countResult.rows[0]!.count), page, pageSize });
   })
 );
 

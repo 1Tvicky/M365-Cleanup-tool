@@ -6,7 +6,10 @@ import {
   getTeamsSummary,
   listCleaningConnections,
   listOneDriveAccounts,
+  listOutlookCalendars,
+  listOutlookContacts,
   listOutlookMailboxes,
+  listOutlookOverview,
   listSharePointSites,
   listTeamsChannels,
   listTeamsDMs,
@@ -20,6 +23,8 @@ import {
   type CleaningSyncResourceStatus,
   type CleaningTeamsSummary,
   type CleanupManifest,
+  type OutlookMailboxOverviewRow,
+  type OutlookOverviewSubResource,
   type PageResult,
 } from "../api/cleaning";
 import { ApiClientError } from "../api/client";
@@ -100,12 +105,14 @@ function pruneToFound<T>(map: Map<string, T>, foundIds: string[]): Map<string, T
   return next;
 }
 
-/** Only 'oneDrive'/'sharePoint'/'outlook' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
+/** Only 'oneDrive'/'sharePoint'/'outlook'/'outlookCalendar'/'outlookContacts' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
 function buildCleanupManifest(
   group: TenantGroup,
   selectedOneDrive: Map<string, CleaningResourceRow>,
   selectedSharePoint: Map<string, CleaningResourceRow>,
   selectedOutlook: Map<string, CleaningResourceRow>,
+  selectedOutlookCalendar: Map<string, CleaningResourceRow>,
+  selectedOutlookContacts: Map<string, CleaningResourceRow>,
   selectedChannels: Map<string, CleaningChannelRow>,
   selectedChats: Map<string, CleaningChatRow>
 ): CleanupManifest {
@@ -113,6 +120,8 @@ function buildCleanupManifest(
   if (selectedOneDrive.size > 0 && group.onedrive) manifest.oneDrive = { connectionId: group.onedrive.id, ids: [...selectedOneDrive.keys()] };
   if (selectedSharePoint.size > 0 && group.sharepoint) manifest.sharePoint = { connectionId: group.sharepoint.id, ids: [...selectedSharePoint.keys()] };
   if (selectedOutlook.size > 0 && group.outlook) manifest.outlook = { connectionId: group.outlook.id, ids: [...selectedOutlook.keys()] };
+  if (selectedOutlookCalendar.size > 0 && group.outlook) manifest.outlookCalendar = { connectionId: group.outlook.id, ids: [...selectedOutlookCalendar.keys()] };
+  if (selectedOutlookContacts.size > 0 && group.outlook) manifest.outlookContacts = { connectionId: group.outlook.id, ids: [...selectedOutlookContacts.keys()] };
   if (selectedChannels.size > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: [...selectedChannels.keys()] };
   if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
   return manifest;
@@ -155,6 +164,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   const [selectedOneDrive, setSelectedOneDrive] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedSharePoint, setSelectedSharePoint] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedOutlook, setSelectedOutlook] = useState<Map<string, CleaningResourceRow>>(new Map());
+  const [selectedOutlookCalendar, setSelectedOutlookCalendar] = useState<Map<string, CleaningResourceRow>>(new Map());
+  const [selectedOutlookContacts, setSelectedOutlookContacts] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
@@ -220,7 +231,16 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     });
 
     if (!activeGroup || !hasSelection(totals)) return;
-    const manifest = buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedOutlook, selectedChannels, selectedChats);
+    const manifest = buildCleanupManifest(
+      activeGroup,
+      selectedOneDrive,
+      selectedSharePoint,
+      selectedOutlook,
+      selectedOutlookCalendar,
+      selectedOutlookContacts,
+      selectedChannels,
+      selectedChats
+    );
     try {
       const { foundIds } = await validateCleanup(manifest);
       const removedCount =
@@ -228,12 +248,16 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         foundIds.oneDrive.length +
         (selectedSharePoint.size - foundIds.sharePoint.length) +
         (selectedOutlook.size - foundIds.outlook.length) +
+        (selectedOutlookCalendar.size - foundIds.outlookCalendar.length) +
+        (selectedOutlookContacts.size - foundIds.outlookContacts.length) +
         (selectedChannels.size - foundIds.channels.length) +
         (selectedChats.size - foundIds.chats.length);
       if (removedCount > 0) {
         setSelectedOneDrive((prev) => pruneToFound(prev, foundIds.oneDrive));
         setSelectedSharePoint((prev) => pruneToFound(prev, foundIds.sharePoint));
         setSelectedOutlook((prev) => pruneToFound(prev, foundIds.outlook));
+        setSelectedOutlookCalendar((prev) => pruneToFound(prev, foundIds.outlookCalendar));
+        setSelectedOutlookContacts((prev) => pruneToFound(prev, foundIds.outlookContacts));
         setSelectedChannels((prev) => pruneToFound(prev, foundIds.channels));
         setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
         setReconciliationBanner(
@@ -253,6 +277,10 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       sharePointBytes: [...selectedSharePoint.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
       outlookMailboxes: selectedOutlook.size,
       outlookItems: [...selectedOutlook.values()].reduce((s, r) => s + r.itemCount, 0),
+      outlookCalendarUsers: selectedOutlookCalendar.size,
+      outlookCalendarEvents: [...selectedOutlookCalendar.values()].reduce((s, r) => s + r.itemCount, 0),
+      outlookContactUsers: selectedOutlookContacts.size,
+      outlookContactCount: [...selectedOutlookContacts.values()].reduce((s, r) => s + r.itemCount, 0),
       teamsChannels: selectedChannels.size,
       teamsMessages: [...selectedChannels.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       teamsChannelsWithKnownCount: [...selectedChannels.values()].filter((r) => r.countStatus === "completed").length,
@@ -260,7 +288,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       dmMessages: [...selectedChats.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       dmsWithKnownCount: [...selectedChats.values()].filter((r) => r.countStatus === "completed").length,
     }),
-    [selectedOneDrive, selectedSharePoint, selectedOutlook, selectedChannels, selectedChats]
+    [selectedOneDrive, selectedSharePoint, selectedOutlook, selectedOutlookCalendar, selectedOutlookContacts, selectedChannels, selectedChats]
   );
 
   function openTenant(group: TenantGroup) {
@@ -269,6 +297,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     setSelectedOneDrive(new Map());
     setSelectedSharePoint(new Map());
     setSelectedOutlook(new Map());
+    setSelectedOutlookCalendar(new Map());
+    setSelectedOutlookContacts(new Map());
     setSelectedChannels(new Map());
     setSelectedChats(new Map());
     setActiveGroup(group);
@@ -276,13 +306,34 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   }
 
   if (view === "review") {
-    return <ReviewPage totals={totals} onBack={() => setView("dashboard")} onContinue={() => setView("cleanupConfirm")} />;
+    return (
+      <ReviewPage
+        totals={totals}
+        selectedOutlookMail={selectedOutlook}
+        setSelectedOutlookMail={setSelectedOutlook}
+        selectedOutlookCalendar={selectedOutlookCalendar}
+        setSelectedOutlookCalendar={setSelectedOutlookCalendar}
+        selectedOutlookContacts={selectedOutlookContacts}
+        setSelectedOutlookContacts={setSelectedOutlookContacts}
+        onBack={() => setView("dashboard")}
+        onContinue={() => setView("cleanupConfirm")}
+      />
+    );
   }
 
   if (view === "cleanupConfirm" && activeGroup) {
     return (
       <CleanupConfirmation
-        manifest={buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedOutlook, selectedChannels, selectedChats)}
+        manifest={buildCleanupManifest(
+          activeGroup,
+          selectedOneDrive,
+          selectedSharePoint,
+          selectedOutlook,
+          selectedOutlookCalendar,
+          selectedOutlookContacts,
+          selectedChannels,
+          selectedChats
+        )}
         onBack={() => setView("review")}
         onStarted={(operationId) => {
           if (onCleanupStarted) {
@@ -314,6 +365,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           setSelectedOneDrive(new Map());
           setSelectedSharePoint(new Map());
           setSelectedOutlook(new Map());
+          setSelectedOutlookCalendar(new Map());
+          setSelectedOutlookContacts(new Map());
           setSelectedChannels(new Map());
           setSelectedChats(new Map());
           setCleanupOperationId(null);
@@ -373,7 +426,15 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         )}
 
         {view === "outlook" && activeGroup?.outlook && (
-          <OutlookView connectionId={activeGroup.outlook.id} selected={selectedOutlook} setSelected={setSelectedOutlook} />
+          <OutlookView
+            connectionId={activeGroup.outlook.id}
+            selectedMail={selectedOutlook}
+            setSelectedMail={setSelectedOutlook}
+            selectedCalendar={selectedOutlookCalendar}
+            setSelectedCalendar={setSelectedOutlookCalendar}
+            selectedContacts={selectedOutlookContacts}
+            setSelectedContacts={setSelectedOutlookContacts}
+          />
         )}
 
         {view === "teams" && activeGroup?.teams && (
@@ -491,7 +552,9 @@ const DISCOVERING_LABEL: Record<"onedrive" | "sharepoint" | "teams" | "outlook",
   onedrive: "Finding accounts…",
   sharepoint: "Finding sites…",
   teams: "Finding teams…",
-  outlook: "Finding mailboxes…",
+  // Sync Now bundles Mail + Calendar + Contacts into this one connection's sync_jobs row (see
+  // cloudSyncWorker.ts's syncOutlook) — this label covers all three phases, not just Mail.
+  outlook: "Finding mailboxes, calendars, and contacts…",
 };
 
 /**
@@ -659,6 +722,8 @@ function Dashboard({
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [sharePointTotals, setSharePointTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [outlookTotals, setOutlookTotals] = useState<{ count: number; items: number } | null>(null);
+  const [outlookCalendarTotals, setOutlookCalendarTotals] = useState<{ events: number } | null>(null);
+  const [outlookContactTotals, setOutlookContactTotals] = useState<{ contacts: number } | null>(null);
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
 
   const refreshTotals = useCallback(() => {
@@ -676,8 +741,17 @@ function Dashboard({
       });
     }
     if (group.outlook) {
+      // Three separate calls to three separate dedicated endpoints, each with its own state — same
+      // as the rest of this component, Mail/Calendar/Contacts are never funnelled through one shared
+      // "which resource" fetch or merged into a single totals object with load-order dependencies.
       listOutlookMailboxes(group.outlook.id, { pageSize: 200 }).then(({ mailboxes, total }) => {
         setOutlookTotals({ count: total, items: mailboxes.reduce((s, m) => s + m.itemCount, 0) });
+      });
+      listOutlookCalendars(group.outlook.id, { pageSize: 200 }).then(({ calendars }) => {
+        setOutlookCalendarTotals({ events: calendars.reduce((s, c) => s + c.itemCount, 0) });
+      });
+      listOutlookContacts(group.outlook.id, { pageSize: 200 }).then(({ contacts }) => {
+        setOutlookContactTotals({ contacts: contacts.reduce((s, c) => s + c.itemCount, 0) });
       });
     }
   }, [group]);
@@ -805,6 +879,8 @@ function Dashboard({
                 <>
                   <div>{outlookTotals.count.toLocaleString()}{outlookTotals.count > 0 ? "+" : ""} mailboxes</div>
                   <div>{outlookTotals.items.toLocaleString()} mail items</div>
+                  <div>{outlookCalendarTotals ? outlookCalendarTotals.events.toLocaleString() : "…"} calendar events</div>
+                  <div>{outlookContactTotals ? outlookContactTotals.contacts.toLocaleString() : "…"} contacts</div>
                 </>
               ) : (
                 <div className="italic text-slate-400">Loading…</div>
@@ -813,7 +889,7 @@ function Dashboard({
               <div className="text-slate-400">Not connected</div>
             )
           }
-          action="View Mailboxes"
+          action="View Outlook"
           onClick={onOpenOutlook}
           disabled={!group.outlook}
           syncControl={
@@ -1006,29 +1082,120 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
   );
 }
 
-function OutlookView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
+interface OutlookMailboxRow extends OutlookMailboxOverviewRow {
+  id: string; // = upn, stable/unique per mailbox within a connection
+}
+
+/** A sub-resource's Graph-facing row, in the shape every selection Map already expects (see buildCleanupManifest). */
+function toSelectionRow(mailbox: OutlookMailboxRow, sub: OutlookOverviewSubResource): CleaningResourceRow {
+  return { id: sub.id, name: mailbox.name, detail: mailbox.upn, storageUsedBytes: 0, itemCount: sub.itemCount, status: sub.status };
+}
+
+/** A row counts as "fully selected" (drives the master checkbox) only when every sub-resource it actually has is selected — a mailbox with no synced Calendar yet doesn't block being "fully" selected on Mail+Contacts. */
+function isRowFullySelected(
+  row: OutlookMailboxRow,
+  selectedMail: Map<string, CleaningResourceRow>,
+  selectedCalendar: Map<string, CleaningResourceRow>,
+  selectedContacts: Map<string, CleaningResourceRow>
+): boolean {
+  if (!selectedMail.has(row.mail.id)) return false;
+  if (row.calendar && !selectedCalendar.has(row.calendar.id)) return false;
+  if (row.contacts && !selectedContacts.has(row.contacts.id)) return false;
+  return true;
+}
+
+/**
+ * One row per mailbox, purely informational Mail/Calendar/Contacts counts, and a single row
+ * checkbox — same shape as every other DiscoveryTable in this app (OneDrive/SharePoint/Teams-DMs).
+ * Selecting a mailbox here includes all three categories for it by default. Per-category control
+ * (excluding just Calendar for one mailbox, say) happens on the Review Selection page instead,
+ * where each selected mailbox gets its own Mail/Calendar/Contacts checkboxes — see ReviewPage's
+ * OutlookReviewSection. The three selection Maps stay exactly what buildCleanupManifest already
+ * expects; only where the fine-tuning UI lives changed. Mail/Calendar/Contacts remain separate
+ * resource types, separate manifest slots, separate execution paths throughout the rest of the app.
+ */
+function OutlookView({
+  connectionId,
+  selectedMail,
+  setSelectedMail,
+  selectedCalendar,
+  setSelectedCalendar,
+  selectedContacts,
+  setSelectedContacts,
+}: {
+  connectionId: string;
+  selectedMail: Map<string, CleaningResourceRow>;
+  setSelectedMail: (m: Map<string, CleaningResourceRow>) => void;
+  selectedCalendar: Map<string, CleaningResourceRow>;
+  setSelectedCalendar: (m: Map<string, CleaningResourceRow>) => void;
+  selectedContacts: Map<string, CleaningResourceRow>;
+  setSelectedContacts: (m: Map<string, CleaningResourceRow>) => void;
+}) {
   const [search, setSearch] = useState("");
-  // Only "name" — the shared listCleaningResources helper's "storage" sort orders by
-  // storage_used_bytes, which is always 0 here (no cheap per-mailbox byte quota under application
-  // permissions; see cloudEnumeration.ts's getUserMailSummary), so offering it would just look broken.
+
   const fetcher = useCallback(
-    (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) =>
-      listOutlookMailboxes(connectionId, opts).then((r) => ({ rows: r.mailboxes, total: r.total, page: r.page, pageSize: r.pageSize })),
+    (opts: { search?: string; page?: number; pageSize?: number }) =>
+      listOutlookOverview(connectionId, opts).then((r) => ({
+        rows: r.mailboxes.map((m) => ({ ...m, id: m.upn })),
+        total: r.total,
+        page: r.page,
+        pageSize: r.pageSize,
+      })),
     [connectionId]
   );
-  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search, "name");
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search);
 
-  const columns: DiscoveryColumn<CleaningResourceRow>[] = [
+  function setRowResource(
+    row: OutlookMailboxRow,
+    sub: OutlookOverviewSubResource | null,
+    selected: Map<string, CleaningResourceRow>,
+    setSelected: (m: Map<string, CleaningResourceRow>) => void,
+    include: boolean
+  ) {
+    if (!sub) return; // nothing synced for this category yet — nothing to (de)select
+    const next = new Map(selected);
+    include ? next.set(sub.id, toSelectionRow(row, sub)) : next.delete(sub.id);
+    setSelected(next);
+  }
+
+  /** "Select All" — every category, every mailbox on the current page. Also backs DiscoveryTable's own header checkbox. */
+  function handleToggleAll() {
+    const allSelected = rows.every((r) => isRowFullySelected(r, selectedMail, selectedCalendar, selectedContacts));
+    const nextMail = new Map(selectedMail);
+    const nextCalendar = new Map(selectedCalendar);
+    const nextContacts = new Map(selectedContacts);
+    for (const row of rows) {
+      const include = !allSelected;
+      include ? nextMail.set(row.mail.id, toSelectionRow(row, row.mail)) : nextMail.delete(row.mail.id);
+      if (row.calendar) (include ? nextCalendar.set(row.calendar.id, toSelectionRow(row, row.calendar)) : nextCalendar.delete(row.calendar.id));
+      if (row.contacts) (include ? nextContacts.set(row.contacts.id, toSelectionRow(row, row.contacts)) : nextContacts.delete(row.contacts.id));
+    }
+    setSelectedMail(nextMail);
+    setSelectedCalendar(nextCalendar);
+    setSelectedContacts(nextContacts);
+  }
+
+  function countCell(sub: OutlookOverviewSubResource | null): React.ReactNode {
+    if (!sub) return <span className="text-slate-300">—</span>;
+    return <span className={sub.status === "failed" ? "text-rose-500" : "text-slate-700"}>{sub.itemCount.toLocaleString()}</span>;
+  }
+
+  const columns: DiscoveryColumn<OutlookMailboxRow>[] = [
     { label: "User Name", render: (r) => r.name },
-    { label: "User Email", render: (r) => r.detail },
-    { label: "Mail Items", align: "right", render: (r) => r.itemCount.toLocaleString() },
-    { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
+    { label: "User Email", render: (r) => r.upn },
+    { label: "Mail Items", align: "right", render: (r) => countCell(r.mail) },
+    { label: "Calendar Events", align: "right", render: (r) => countCell(r.calendar) },
+    { label: "Contacts", align: "right", render: (r) => countCell(r.contacts) },
   ];
 
   return (
     <div>
       <h2 className="mb-1 text-lg font-semibold text-slate-800">Outlook</h2>
-      <p className="mb-5 text-sm text-slate-500">All mailboxes and their mail item counts</p>
+      <p className="mb-5 text-sm text-slate-500">
+        Mail, calendar events, and contacts for every mailbox. Select a mailbox here, then choose which of Mail/Calendar/Contacts
+        to actually clean on the Review Selection page. Never touches mail folders, calendars, or contact folders themselves.
+      </p>
+
       <DiscoveryTable
         title="Outlook Mailboxes"
         columns={columns}
@@ -1042,17 +1209,16 @@ function OutlookView({ connectionId, selected, setSelected }: { connectionId: st
         search={search}
         onSearchChange={setSearch}
         searchPlaceholder="Search users…"
-        selected={new Set(selected.keys())}
+        selected={new Set(rows.filter((r) => isRowFullySelected(r, selectedMail, selectedCalendar, selectedContacts)).map((r) => r.id))}
         onToggle={(id) => {
           const row = rows.find((r) => r.id === id);
-          if (row) toggleInMap(selected, setSelected, id, row);
+          if (!row) return;
+          const include = !isRowFullySelected(row, selectedMail, selectedCalendar, selectedContacts);
+          setRowResource(row, row.mail, selectedMail, setSelectedMail, include);
+          setRowResource(row, row.calendar, selectedCalendar, setSelectedCalendar, include);
+          setRowResource(row, row.contacts, selectedContacts, setSelectedContacts, include);
         }}
-        onToggleAll={() => {
-          const allSelected = rows.every((r) => selected.has(r.id));
-          const next = new Map(selected);
-          for (const r of rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
-          setSelected(next);
-        }}
+        onToggleAll={handleToggleAll}
         emptyMessage="No Outlook mailboxes found."
       />
     </div>
@@ -1241,7 +1407,114 @@ function TeamsView({
   );
 }
 
-function ReviewPage({ totals, onBack, onContinue }: { totals: SelectionTotals; onBack: () => void; onContinue: () => void }) {
+/** One row per mailbox appearing in any of the three Outlook selection Maps, grouped by upn (CleaningResourceRow.detail) since each Map only knows its own resource's id — reconstructed here purely for display/editing on this page. */
+interface OutlookReviewRow {
+  upn: string;
+  name: string;
+  mail: CleaningResourceRow | null;
+  calendar: CleaningResourceRow | null;
+  contacts: CleaningResourceRow | null;
+}
+
+function buildOutlookReviewRows(
+  selectedMail: Map<string, CleaningResourceRow>,
+  selectedCalendar: Map<string, CleaningResourceRow>,
+  selectedContacts: Map<string, CleaningResourceRow>
+): OutlookReviewRow[] {
+  const byUpn = new Map<string, OutlookReviewRow>();
+  function upsert(row: CleaningResourceRow, slot: "mail" | "calendar" | "contacts") {
+    const existing = byUpn.get(row.detail) ?? { upn: row.detail, name: row.name, mail: null, calendar: null, contacts: null };
+    existing[slot] = row;
+    byUpn.set(row.detail, existing);
+  }
+  for (const row of selectedMail.values()) upsert(row, "mail");
+  for (const row of selectedCalendar.values()) upsert(row, "calendar");
+  for (const row of selectedContacts.values()) upsert(row, "contacts");
+  return [...byUpn.values()].sort((a, b) => a.name.localeCompare(b.name));
+}
+
+/**
+ * Per-mailbox Mail/Calendar/Contacts checkboxes — this is where per-mailbox control actually lives
+ * (not the Outlook discovery table, which only offers one row checkbox that includes all three by
+ * default). Unchecking one here removes just that entry from its own selection Map; the other two
+ * Maps, and every other cloud's selection, are untouched.
+ */
+function OutlookReviewSection({
+  selectedMail,
+  setSelectedMail,
+  selectedCalendar,
+  setSelectedCalendar,
+  selectedContacts,
+  setSelectedContacts,
+}: {
+  selectedMail: Map<string, CleaningResourceRow>;
+  setSelectedMail: (m: Map<string, CleaningResourceRow>) => void;
+  selectedCalendar: Map<string, CleaningResourceRow>;
+  setSelectedCalendar: (m: Map<string, CleaningResourceRow>) => void;
+  selectedContacts: Map<string, CleaningResourceRow>;
+  setSelectedContacts: (m: Map<string, CleaningResourceRow>) => void;
+}) {
+  const rows = buildOutlookReviewRows(selectedMail, selectedCalendar, selectedContacts);
+  if (rows.length === 0) return null;
+
+  function toggle(row: CleaningResourceRow | null, selected: Map<string, CleaningResourceRow>, setSelected: (m: Map<string, CleaningResourceRow>) => void) {
+    if (!row) return;
+    const next = new Map(selected);
+    next.delete(row.id);
+    setSelected(next);
+  }
+
+  return (
+    <div className="border-b border-slate-100 pb-3">
+      <span className="text-sm font-medium text-slate-700">Outlook</span>
+      <div className="mt-3 space-y-2">
+        {rows.map((row) => (
+          <div key={row.upn} className="flex items-center justify-between rounded-md bg-slate-50 px-3 py-2">
+            <div className="text-sm text-slate-700">
+              {row.name} <span className="text-slate-400">· {row.upn}</span>
+            </div>
+            <div className="flex items-center gap-4 text-sm text-slate-600">
+              <label className={`flex items-center gap-1.5 ${row.mail ? "" : "opacity-30"}`}>
+                <input type="checkbox" checked={row.mail != null} disabled={!row.mail} onChange={() => toggle(row.mail, selectedMail, setSelectedMail)} />
+                Mail
+              </label>
+              <label className={`flex items-center gap-1.5 ${row.calendar ? "" : "opacity-30"}`}>
+                <input type="checkbox" checked={row.calendar != null} disabled={!row.calendar} onChange={() => toggle(row.calendar, selectedCalendar, setSelectedCalendar)} />
+                Calendar
+              </label>
+              <label className={`flex items-center gap-1.5 ${row.contacts ? "" : "opacity-30"}`}>
+                <input type="checkbox" checked={row.contacts != null} disabled={!row.contacts} onChange={() => toggle(row.contacts, selectedContacts, setSelectedContacts)} />
+                Contacts
+              </label>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function ReviewPage({
+  totals,
+  selectedOutlookMail,
+  setSelectedOutlookMail,
+  selectedOutlookCalendar,
+  setSelectedOutlookCalendar,
+  selectedOutlookContacts,
+  setSelectedOutlookContacts,
+  onBack,
+  onContinue,
+}: {
+  totals: SelectionTotals;
+  selectedOutlookMail: Map<string, CleaningResourceRow>;
+  setSelectedOutlookMail: (m: Map<string, CleaningResourceRow>) => void;
+  selectedOutlookCalendar: Map<string, CleaningResourceRow>;
+  setSelectedOutlookCalendar: (m: Map<string, CleaningResourceRow>) => void;
+  selectedOutlookContacts: Map<string, CleaningResourceRow>;
+  setSelectedOutlookContacts: (m: Map<string, CleaningResourceRow>) => void;
+  onBack: () => void;
+  onContinue: () => void;
+}) {
   const totalBytes = totals.oneDriveBytes + totals.sharePointBytes;
   const totalMessages = totals.teamsMessages + totals.dmMessages;
 
@@ -1263,12 +1536,14 @@ function ReviewPage({ totals, onBack, onContinue }: { totals: SelectionTotals; o
             <span className="text-sm text-slate-600">{totals.sharePointSites.toLocaleString()} sites · {formatBytes(totals.sharePointBytes)}</span>
           </div>
         )}
-        {totals.outlookMailboxes > 0 && (
-          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
-            <span className="text-sm font-medium text-slate-700">Outlook</span>
-            <span className="text-sm text-slate-600">{totals.outlookMailboxes.toLocaleString()} mailboxes · {totals.outlookItems.toLocaleString()} mail items</span>
-          </div>
-        )}
+        <OutlookReviewSection
+          selectedMail={selectedOutlookMail}
+          setSelectedMail={setSelectedOutlookMail}
+          selectedCalendar={selectedOutlookCalendar}
+          setSelectedCalendar={setSelectedOutlookCalendar}
+          selectedContacts={selectedOutlookContacts}
+          setSelectedContacts={setSelectedOutlookContacts}
+        />
         {totals.teamsChannels > 0 && (
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <span className="text-sm font-medium text-slate-700">Teams Channels</span>

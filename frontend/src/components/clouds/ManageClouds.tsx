@@ -1,7 +1,10 @@
-import { useState } from "react";
-import { listConnectionUsers, type ConnectionUserRow, type ManageCloudsRow } from "../../api/clouds";
+import { useEffect, useState } from "react";
+import { exportConnectionUsersUrl, listConnectionUsers, type ConnectionUserRow, type ManageCloudsRow } from "../../api/clouds";
 import { OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 import type { Workload } from "../../types";
+import { formatBytes } from "../../utils/format";
+
+const USERS_PAGE_SIZE = 50;
 
 const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = {
   onedrive: OneDriveIcon,
@@ -199,75 +202,127 @@ function DisconnectConfirmModal({ row, onCancel, onConfirm }: { row: ManageCloud
   );
 }
 
+/**
+ * Total/Active/In-Active tiles + the full per-user table (not gated behind a "show failed" click —
+ * every row, every status, always visible once expanded) + a CSV export of the whole list. "Active"
+ * here means this app's own last sync actually found and read real data for that user
+ * (sync_status='synced') — not Azure AD's accountEnabled, which would still count guests/unlicensed
+ * accounts as "active" and reproduce the same over-counting this was built to fix (see the "395
+ * mailboxes" investigation this session — most were guest/unlicensed accounts with no real mailbox).
+ */
 function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
-  const [showFailed, setShowFailed] = useState(false);
-  const [failedUsers, setFailedUsers] = useState<ConnectionUserRow[] | null>(null);
-  const [loadingFailed, setLoadingFailed] = useState(false);
   const unit = UNIT_LABELS[row.cloudType];
+  const [cursorStack, setCursorStack] = useState<(string | null)[]>([null]);
+  const [pageIndex, setPageIndex] = useState(0);
+  const [users, setUsers] = useState<ConnectionUserRow[] | null>(null);
+  const [nextCursor, setNextCursor] = useState<string | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
 
-  async function handleShowFailed() {
-    setShowFailed(true);
-    if (failedUsers) return;
-    setLoadingFailed(true);
-    try {
-      const { users } = await listConnectionUsers(row.id, { status: "failed" });
-      setFailedUsers(users);
-    } finally {
-      setLoadingFailed(false);
-    }
-  }
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+    listConnectionUsers(row.id, { cursor: cursorStack[pageIndex] ?? undefined, limit: USERS_PAGE_SIZE })
+      .then(({ users: rows, nextCursor: next }) => {
+        if (cancelled) return;
+        setUsers(rows);
+        setNextCursor(next);
+      })
+      .catch(() => {
+        if (!cancelled) setError("Couldn't load the user list. Try again.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [row.id, cursorStack, pageIndex]);
 
   return (
     <div className="border-t border-slate-100 bg-slate-50 px-6 py-4">
-      <div className="grid grid-cols-2 gap-x-8 gap-y-3 sm:grid-cols-4">
-        <Field label="Name" value={row.adminDisplayName ?? row.adminEmail} />
-        <Field label="Domain Name" value={row.tenantDomain} />
-        <Field label={`Total ${unit.plural}`} value={row.totalUsers.toLocaleString()} />
-        <Field label={`Added ${unit.plural}`} value={row.addedUsers.toLocaleString()} />
+      <div className="grid grid-cols-3 gap-4">
+        <StatTile label={`Total ${unit.plural}`} value={row.totalUsers} />
+        <StatTile label={`Active ${unit.plural}`} value={row.addedUsers} />
+        <StatTile label={`In-Active ${unit.plural}`} value={row.notAddedUsers} />
       </div>
 
-      {row.notAddedUsers > 0 && (
-        <div className="mt-4 flex items-center gap-4">
-          <span className="rounded-md bg-rose-50 px-3 py-1.5 text-sm font-semibold text-rose-600">
-            {unit.plural} Not Added <span className="ml-1">{row.notAddedUsers.toLocaleString()}</span>
-          </span>
-          <button onClick={handleShowFailed} className="text-sm font-semibold text-[#1b2fc4] underline underline-offset-2">
-            Failed {unit.plural} Details
-          </button>
+      <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
+        <div className="flex items-center justify-end border-b border-slate-100 px-4 py-2">
+          <a
+            href={exportConnectionUsersUrl(row.id)}
+            className="flex items-center gap-1.5 text-sm font-semibold text-[#1b2fc4] hover:opacity-80"
+          >
+            <DownloadIcon className="h-4 w-4" /> CSV
+          </a>
         </div>
-      )}
 
-      {showFailed && (
-        <div className="mt-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
-          {loadingFailed ? (
-            <div className="px-4 py-3 text-sm text-slate-500">Loading…</div>
-          ) : (
-            <table className="w-full text-sm">
-              <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+        {error ? (
+          <div className="px-4 py-3 text-sm text-rose-600">{error}</div>
+        ) : (
+          <table className="w-full text-sm">
+            <thead className="bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
+              <tr>
+                <th className="px-4 py-2 font-medium">S.No</th>
+                <th className="px-4 py-2 font-medium">Name</th>
+                <th className="px-4 py-2 font-medium">Email</th>
+                <th className="px-4 py-2 font-medium">{unit.singular} Size</th>
+                <th className="px-4 py-2 font-medium">Status</th>
+              </tr>
+            </thead>
+            <tbody className="divide-y divide-slate-100">
+              {loading ? (
                 <tr>
-                  <th className="px-4 py-2 font-medium">{unit.singular}</th>
-                  <th className="px-4 py-2 font-medium">Reason</th>
+                  <td colSpan={5} className="px-4 py-3 text-slate-400">
+                    Loading…
+                  </td>
                 </tr>
-              </thead>
-              <tbody className="divide-y divide-slate-100">
-                {(failedUsers ?? []).map((u) => (
+              ) : users && users.length > 0 ? (
+                users.map((u, i) => (
                   <tr key={u.id}>
+                    <td className="px-4 py-2 text-slate-500">{pageIndex * USERS_PAGE_SIZE + i + 1}</td>
                     <td className="px-4 py-2 text-slate-700">{u.displayName ?? u.upn}</td>
-                    <td className="px-4 py-2 text-slate-500">{u.errorMessage ?? "Unknown error"}</td>
-                  </tr>
-                ))}
-                {failedUsers?.length === 0 && (
-                  <tr>
-                    <td colSpan={2} className="px-4 py-3 text-slate-400">
-                      No failed users found.
+                    <td className="px-4 py-2 text-slate-500">{u.upn}</td>
+                    <td className="px-4 py-2 text-slate-500">{u.storageUsedBytes > 0 ? formatBytes(u.storageUsedBytes) : "-"}</td>
+                    <td className="px-4 py-2">
+                      <UserStatusBadge syncStatus={u.syncStatus} />
                     </td>
                   </tr>
-                )}
-              </tbody>
-            </table>
-          )}
-        </div>
-      )}
+                ))
+              ) : (
+                <tr>
+                  <td colSpan={5} className="px-4 py-3 text-slate-400">
+                    No {unit.plural.toLowerCase()} found.
+                  </td>
+                </tr>
+              )}
+            </tbody>
+          </table>
+        )}
+
+        {(pageIndex > 0 || nextCursor) && (
+          <div className="flex items-center justify-between border-t border-slate-100 px-4 py-2 text-sm">
+            <button
+              onClick={() => setPageIndex((p) => p - 1)}
+              disabled={pageIndex === 0}
+              className="font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              ← Previous
+            </button>
+            <button
+              onClick={() => {
+                setCursorStack((prev) => [...prev.slice(0, pageIndex + 1), nextCursor]);
+                setPageIndex((p) => p + 1);
+              }}
+              disabled={!nextCursor}
+              className="font-medium text-slate-500 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40"
+            >
+              Next →
+            </button>
+          </div>
+        )}
+      </div>
 
       {row.status === "needs_reauth" && (
         <p className="mt-3 text-sm text-amber-700">
@@ -279,13 +334,19 @@ function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
   );
 }
 
-function Field({ label, value }: { label: string; value: string }) {
+function StatTile({ label, value }: { label: string; value: number }) {
   return (
-    <div>
-      <div className="text-[11px] font-medium uppercase tracking-wide text-slate-400">{label}</div>
-      <div className="text-sm text-slate-800">{value}</div>
+    <div className="rounded-lg border border-slate-200 bg-white px-4 py-3">
+      <div className="text-sm text-slate-500">{label}</div>
+      <div className="mt-1 text-2xl font-bold text-slate-900">{value.toLocaleString()}</div>
     </div>
   );
+}
+
+function UserStatusBadge({ syncStatus }: { syncStatus: ConnectionUserRow["syncStatus"] }) {
+  if (syncStatus === "synced") return <span className="text-emerald-600">Active</span>;
+  if (syncStatus === "failed") return <span className="text-rose-500">Inactive</span>;
+  return <span className="italic text-slate-400">Pending</span>;
 }
 
 function formatDate(iso: string): string {
@@ -304,6 +365,14 @@ function ChevronIcon({ className }: { className?: string }) {
   return (
     <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.5">
       <path d="M5.5 7.5 10 12l4.5-4.5" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
+function DownloadIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 20 20" className={className} fill="none" stroke="currentColor" strokeWidth="1.5">
+      <path d="M10 3v9m0 0-3.5-3.5M10 12l3.5-3.5M4 14.5v1a1.5 1.5 0 0 0 1.5 1.5h9a1.5 1.5 0 0 0 1.5-1.5v-1" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
 }

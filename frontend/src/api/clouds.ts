@@ -45,13 +45,19 @@ export function listManageClouds(): Promise<{ connections: ManageCloudsRow[] }> 
 
 export function listConnectionUsers(
   connectionId: string,
-  opts: { status?: "failed" | "synced" | "pending"; cursor?: string } = {}
+  opts: { status?: "failed" | "synced" | "pending"; cursor?: string; limit?: number } = {}
 ): Promise<{ users: ConnectionUserRow[]; nextCursor: string | null }> {
   const params = new URLSearchParams();
   if (opts.status) params.set("status", opts.status);
   if (opts.cursor) params.set("cursor", opts.cursor);
+  if (opts.limit) params.set("limit", String(opts.limit));
   const qs = params.toString();
   return rawFetch(`/api/clouds/${connectionId}/users${qs ? `?${qs}` : ""}`);
+}
+
+/** Not a rawFetch call — the export is a CSV file download (Content-Disposition: attachment), which a plain navigation/anchor click handles natively (same pattern as api/cleaning.ts's cleanupReportUrl). */
+export function exportConnectionUsersUrl(connectionId: string): string {
+  return `/api/clouds/${connectionId}/users/export`;
 }
 
 export function initCloudConnect(cloudType: CloudType): Promise<{ authorizeUrl: string; state: string }> {

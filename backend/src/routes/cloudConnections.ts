@@ -4,6 +4,7 @@ import { query } from "../db/pool.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireSession } from "../middleware/auth.js";
 import { requireInternalAdmin } from "../middleware/internalAdmin.js";
+import { invalidateTenantTokenCache } from "../graph/client.js";
 import { exchangeM365ConnectCode, getM365ConnectAuthorizeUrl } from "../services/m365ConnectAuth.js";
 import { consumeConnectAttempt, InvalidOAuthStateError, startConnectAttempt } from "../services/oauthState.js";
 import { encryptToken } from "../services/tokenEncryption.js";
@@ -69,6 +70,7 @@ cloudConnectionsRouter.get(
       last_error: string | null;
       total_users: number | null;
       processed_users: number | null;
+      total_known_users: string | null;
       added_users: string | null;
       not_added_users: string | null;
     }>(
@@ -76,12 +78,13 @@ cloudConnectionsRouter.get(
               c.id, c.cloud_type, c.display_name, c.admin_upn, c.admin_display_name, c.status,
               c.connected_at, c.last_synced_at, c.last_error,
               sj.total_users, sj.processed_users,
-              cu.added_users, cu.not_added_users
+              cu.total_known_users, cu.added_users, cu.not_added_users
        FROM connections c
        JOIN tenant_roles tr ON tr.tenant_id = c.tenant_id AND tr.operator_id = $1
        LEFT JOIN sync_jobs sj ON sj.connection_id = c.id
        LEFT JOIN (
          SELECT connection_id,
+                COUNT(*) AS total_known_users,
                 COUNT(*) FILTER (WHERE sync_status = 'synced') AS added_users,
                 COUNT(*) FILTER (WHERE sync_status = 'failed') AS not_added_users
          FROM connection_users
@@ -93,7 +96,12 @@ cloudConnectionsRouter.get(
     );
 
     const connections: ManageCloudsRow[] = result.rows.map((r) => {
-      const total = r.total_users ?? 0;
+      // totalUsers is sourced from connection_users (the real, discovered count), never from
+      // sync_jobs.total_users directly — a sync job's own total is per-job bookkeeping (e.g.
+      // Outlook's syncOutlook runs Mail/Calendar/Contacts as separate internal passes over the
+      // same job row) and isn't guaranteed to stay 1:1 with "how many users/sites we actually
+      // know about" the way this row's headline count needs to be.
+      const total = Number(r.total_known_users ?? r.total_users ?? 0);
       const processed = r.processed_users ?? 0;
       return {
         id: r.id,
@@ -204,6 +212,51 @@ cloudConnectionsRouter.get(
     }));
 
     res.json({ users, nextCursor: users.length === limit ? users[users.length - 1]!.id : null });
+  })
+);
+
+function csvEscape(value: string): string {
+  return /[",\n]/.test(value) ? `"${value.replace(/"/g, '""')}"` : value;
+}
+
+/** GET /api/clouds/:id/users/export — the full per-user list as a CSV download, no pagination cap (the on-screen table pages, the export doesn't). */
+cloudConnectionsRouter.get(
+  "/:id/users/export",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+
+    const result = await query<{
+      upn: string;
+      display_name: string | null;
+      storage_used_bytes: string;
+      item_count: number;
+      sync_status: ConnectionUserRow["syncStatus"];
+      error_message: string | null;
+    }>(
+      `SELECT upn, display_name, storage_used_bytes, item_count, sync_status, error_message
+       FROM connection_users
+       WHERE connection_id = $1
+       ORDER BY COALESCE(display_name, upn)`,
+      [req.params.id]
+    );
+
+    const header = ["Name", "Email", "Storage Used (bytes)", "Item Count", "Status", "Notes"].map(csvEscape).join(",");
+    const rows = result.rows.map((r) =>
+      [
+        r.display_name ?? r.upn,
+        r.upn,
+        r.storage_used_bytes,
+        r.item_count,
+        r.sync_status === "synced" ? "Active" : r.sync_status === "failed" ? "Inactive" : "Pending",
+        r.error_message ?? "",
+      ]
+        .map((v) => csvEscape(String(v)))
+        .join(",")
+    );
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader("Content-Disposition", `attachment; filename="users-${req.params.id}.csv"`);
+    res.send([header, ...rows].join("\r\n"));
   })
 );
 
@@ -487,6 +540,15 @@ m365ConnectCallbackRouter.get(
         ]
       );
       const connectionId = connResult.rows[0]!.id;
+
+      // A running backend process may already hold a cached application-permission token for this
+      // tenant (graph/client.ts's tokenCache, keyed only by m365TenantId — shared across every
+      // cloud type for the tenant, not just the one being (re)connected here) from before this
+      // consent screen ran. Without this, a reconnect that adds a new permission (e.g. Mail.ReadWrite
+      // added after a tenant's first consent) would silently keep using the stale pre-consent token
+      // until the ~55-minute cache TTL expires — reconnecting would appear to succeed while sync
+      // still failed with the exact same permission error as before.
+      invalidateTenantTokenCache(identity.m365TenantId);
 
       // Every /api/clouds/* route (including GET /manage) scopes access through tenant_roles —
       // without this, the tenant this operator just connected would be invisible to them too,

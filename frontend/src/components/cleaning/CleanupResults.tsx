@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from "react";
+import { Fragment, useCallback, useEffect, useState } from "react";
 import {
   cleanupReportUrl,
   getCleanupOperationItems,
@@ -11,12 +11,15 @@ import {
 } from "../../api/cleaning";
 import { ApiClientError } from "../../api/client";
 import { PageFooter } from "./DiscoveryTable";
+import { ItemFilesDrilldown } from "./ItemFilesDrilldown";
 import { formatBytes, formatDate } from "../../utils/format";
 
 const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
   sharepoint_site: "SharePoint site",
   outlook_mailbox: "Outlook mailbox",
+  outlook_calendar: "Outlook calendar event",
+  outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message",
 };
@@ -56,6 +59,7 @@ export function CleanupResultsView({ operationId, onDone, onRetried }: { operati
   const [error, setError] = useState<string | null>(null);
   const [retrying, setRetrying] = useState(false);
   const [retryError, setRetryError] = useState<string | null>(null);
+  const [expandedItemId, setExpandedItemId] = useState<string | null>(null);
 
   useEffect(() => {
     getCleanupProgress(operationId)
@@ -177,6 +181,7 @@ export function CleanupResultsView({ operationId, onDone, onRetried }: { operati
               <table className="w-full text-sm">
                 <thead className="sticky top-0 bg-slate-50 text-left text-xs uppercase tracking-wide text-slate-500">
                   <tr>
+                    <th className="w-8 px-4 py-3" />
                     <th className="px-4 py-3 font-medium">Resource</th>
                     <th className="px-4 py-3 font-medium">Type</th>
                     <th className="px-4 py-3 font-medium">Status</th>
@@ -185,15 +190,30 @@ export function CleanupResultsView({ operationId, onDone, onRetried }: { operati
                 </thead>
                 <tbody className="divide-y divide-slate-100">
                   {items.map((item) => (
-                    <tr key={item.id} className="hover:bg-slate-50/60">
-                      <td className="px-4 py-3 text-slate-700">
-                        {item.displayName}
-                        {friendlyError(item) && <div className="text-xs text-rose-500">{friendlyError(item)}</div>}
-                      </td>
-                      <td className="px-4 py-3 text-slate-500">{RESOURCE_LABEL[item.resourceType]}</td>
-                      <td className={`px-4 py-3 font-medium ${STATUS_STYLE[item.status].className}`}>{STATUS_STYLE[item.status].label}</td>
-                      <td className="px-4 py-3 text-slate-500">{formatDate(item.completedAt)}</td>
-                    </tr>
+                    <Fragment key={item.id}>
+                      <tr
+                        className="cursor-pointer hover:bg-slate-50/60"
+                        onClick={() => setExpandedItemId((prev) => (prev === item.id ? null : item.id))}
+                      >
+                        <td className="px-4 py-3 text-slate-400">
+                          <span className={`inline-block transition-transform ${expandedItemId === item.id ? "rotate-90" : ""}`}>▸</span>
+                        </td>
+                        <td className="px-4 py-3 text-slate-700">
+                          {item.displayName}
+                          {friendlyError(item) && <div className="text-xs text-rose-500">{friendlyError(item)}</div>}
+                        </td>
+                        <td className="px-4 py-3 text-slate-500">{RESOURCE_LABEL[item.resourceType]}</td>
+                        <td className={`px-4 py-3 font-medium ${STATUS_STYLE[item.status].className}`}>{STATUS_STYLE[item.status].label}</td>
+                        <td className="px-4 py-3 text-slate-500">{formatDate(item.completedAt)}</td>
+                      </tr>
+                      {expandedItemId === item.id && (
+                        <tr>
+                          <td colSpan={5} className="p-0">
+                            <ItemFilesDrilldown operationId={operationId} itemId={item.id} />
+                          </td>
+                        </tr>
+                      )}
+                    </Fragment>
                   ))}
                 </tbody>
               </table>

@@ -2,8 +2,17 @@ import { useEffect, useRef, useState } from "react";
 import { ReportsTable } from "../components/reports/ReportsTable";
 import { CleanupProgressView } from "../components/cleaning/CleanupProgress";
 import { CleanupResultsView } from "../components/cleaning/CleanupResults";
-import { getCleanupProgress, listCleanupOperations, type CleanupOperationRow, type CleanupOperationStatus } from "../api/cleaning";
+import { useDebouncedValue } from "../components/cleaning/DiscoveryTable";
+import {
+  getCleanupOperationsSummary,
+  getCleanupProgress,
+  listCleanupOperations,
+  type CleanupOperationRow,
+  type CleanupOperationStatus,
+  type CleanupOperationsSummary,
+} from "../api/cleaning";
 import { ApiClientError } from "../api/client";
+import { formatBytes, formatDate } from "../utils/format";
 
 const PAGE_SIZE = 20;
 const TERMINAL_STATUSES = new Set<CleanupOperationStatus>(["completed", "completed_with_errors", "failed", "cancelled"]);
@@ -33,23 +42,43 @@ export function ReportsPage() {
   // Tracks the previous detailOperationId so the URL-sync effect below can tell "opened/closed a
   // detail" (worth a Back stop) apart from "just changed list page" (shouldn't be — see that effect).
   const prevDetailIdRef = useRef(initial.operationId);
+  const [searchInput, setSearchInput] = useState("");
+  const search = useDebouncedValue(searchInput, 400);
+  const [summary, setSummary] = useState<CleanupOperationsSummary | null>(null);
+  // Distinguishes "still loading the very first page" (worth a full-panel "Loading…") from any
+  // later load (a page change, a search) where the table itself should stay mounted and just show
+  // its own empty/row state — never regresses back to false once the first load settles.
+  const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
-  function load(targetPage: number) {
+  function load(targetPage: number, targetSearch: string) {
     setLoading(true);
-    listCleanupOperations({ page: targetPage, pageSize: PAGE_SIZE })
+    listCleanupOperations({ page: targetPage, pageSize: PAGE_SIZE, search: targetSearch || undefined })
       .then((res) => {
         setOperations(res.operations);
         setTotal(res.total);
         setError(null);
       })
       .catch((err) => setError(err instanceof ApiClientError ? err.message : "Couldn't load cleanup reports."))
-      .finally(() => setLoading(false));
+      .finally(() => {
+        setLoading(false);
+        setHasLoadedOnce(true);
+      });
+    getCleanupOperationsSummary()
+      .then(setSummary)
+      .catch(() => {});
   }
 
+  // A search change always starts back at page 1 — a stale page number from a differently-filtered
+  // list wouldn't make sense against the new one.
   useEffect(() => {
-    load(page);
+    setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [page]);
+  }, [search]);
+
+  useEffect(() => {
+    load(page, search);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, search]);
 
   // Deep-link / reload with ?operationId= already in the URL — resolve whether it's still running
   // so we land on the right sub-view without waiting for the list to load first. Only ever needs to
@@ -97,7 +126,7 @@ export function ReportsPage() {
 
   function closeDetails() {
     setDetailOperationId(null);
-    load(page);
+    load(page, search);
   }
 
   if (detailOperationId) {
@@ -128,14 +157,31 @@ export function ReportsPage() {
     <div className="mx-auto max-w-5xl px-8 py-8">
       <h1 className="mb-1 text-xl font-semibold text-slate-900">Reports</h1>
       <p className="mb-6 text-sm text-slate-500">Cleanup job history and live progress.</p>
-      {loading && operations.length === 0 ? (
-        <p className="rounded-xl border border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">Loading…</p>
-      ) : error ? (
+      {summary && (
+        <div className="mb-6 grid grid-cols-2 gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:grid-cols-4">
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Total Migrations</div>
+            <div className="mt-1 text-lg font-semibold text-slate-900">{summary.totalOperations.toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Processed Migrations</div>
+            <div className="mt-1 text-lg font-semibold text-slate-900">{summary.processedItems.toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Total Items</div>
+            <div className="mt-1 text-lg font-semibold text-slate-900">{summary.totalItems.toLocaleString()}</div>
+          </div>
+          <div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Processed Data Size</div>
+            <div className="mt-1 text-lg font-semibold text-slate-900">{formatBytes(summary.bytesCleared)}</div>
+          </div>
+          <div className="col-span-2 text-xs text-slate-400 sm:col-span-4">Updated {formatDate(summary.updatedAt)}</div>
+        </div>
+      )}
+      {error ? (
         <p className="rounded-xl border border-slate-200 bg-white px-4 py-8 text-center text-sm text-rose-600">{error}</p>
-      ) : operations.length === 0 ? (
-        <p className="rounded-xl border border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">
-          No cleanup operations yet. Start a cleanup from the Cleaning page to see it here.
-        </p>
+      ) : !hasLoadedOnce ? (
+        <p className="rounded-xl border border-slate-200 bg-white px-4 py-8 text-center text-sm text-slate-500">Loading…</p>
       ) : (
         <ReportsTable
           operations={operations}
@@ -146,6 +192,8 @@ export function ReportsPage() {
           total={total}
           onGoToPage={setPage}
           loading={loading}
+          search={searchInput}
+          onSearchChange={setSearchInput}
         />
       )}
     </div>

@@ -7,7 +7,7 @@ function selectedCloudNames(summary: CleanupValidationResult["summary"]): string
   const names: string[] = [];
   if (summary.oneDriveAccounts > 0) names.push("OneDrive");
   if (summary.sharePointSites > 0) names.push("SharePoint");
-  if (summary.outlookMailboxes > 0) names.push("Outlook");
+  if (summary.outlookMailboxes > 0 || summary.outlookCalendars > 0 || summary.outlookContacts > 0) names.push("Outlook");
   return names.length > 0 ? names.join(" and ") : "Microsoft 365";
 }
 
@@ -15,6 +15,8 @@ const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
   sharepoint_site: "SharePoint site",
   outlook_mailbox: "Outlook mailbox",
+  outlook_calendar: "Outlook calendar event",
+  outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message conversation",
 };

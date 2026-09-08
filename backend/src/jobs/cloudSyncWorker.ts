@@ -3,6 +3,8 @@ import { query } from "../db/pool.js";
 import { graphClientForTenant } from "../graph/client.js";
 import {
   getSiteDriveQuota,
+  getUserCalendarEventCount,
+  getUserContactCount,
   getUserDriveQuota,
   getUserJoinedTeamsCount,
   getUserMailSummary,
@@ -43,6 +45,61 @@ async function pruneStaleConnectionUsers(connectionId: string, currentIds: strin
 async function upsertConnectionUser(connectionId: string, row: ConnectionUserUpsert): Promise<void> {
   await query(
     `INSERT INTO connection_users
+       (connection_id, graph_user_id, upn, display_name, storage_used_bytes, item_count, sync_status, error_message, last_synced_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+     ON CONFLICT (connection_id, graph_user_id) DO UPDATE SET
+       upn = EXCLUDED.upn,
+       display_name = EXCLUDED.display_name,
+       storage_used_bytes = EXCLUDED.storage_used_bytes,
+       item_count = EXCLUDED.item_count,
+       sync_status = EXCLUDED.sync_status,
+       error_message = EXCLUDED.error_message,
+       last_synced_at = now()`,
+    [connectionId, row.graphUserId, row.upn, row.displayName, row.storageUsedBytes, row.itemCount, row.syncStatus, row.errorMessage]
+  );
+}
+
+// Calendar and Contacts get their own prune/upsert pair, deliberately not a shared
+// resource-parameterized helper — mirrors connection_users' pair but targets its own dedicated
+// table (connection_outlook_calendars). See docs/azure-ad-app-registration.md's Outlook isolation
+// note and migrations/011_outlook_calendar_contacts.sql's comment for why these tables aren't
+// folded into connection_users.
+async function pruneStaleOutlookCalendars(connectionId: string, currentIds: string[]): Promise<void> {
+  await query(`DELETE FROM connection_outlook_calendars WHERE connection_id = $1 AND NOT (graph_user_id = ANY($2::text[]))`, [
+    connectionId,
+    currentIds,
+  ]);
+}
+
+async function upsertOutlookCalendar(connectionId: string, row: ConnectionUserUpsert): Promise<void> {
+  await query(
+    `INSERT INTO connection_outlook_calendars
+       (connection_id, graph_user_id, upn, display_name, storage_used_bytes, item_count, sync_status, error_message, last_synced_at)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
+     ON CONFLICT (connection_id, graph_user_id) DO UPDATE SET
+       upn = EXCLUDED.upn,
+       display_name = EXCLUDED.display_name,
+       storage_used_bytes = EXCLUDED.storage_used_bytes,
+       item_count = EXCLUDED.item_count,
+       sync_status = EXCLUDED.sync_status,
+       error_message = EXCLUDED.error_message,
+       last_synced_at = now()`,
+    [connectionId, row.graphUserId, row.upn, row.displayName, row.storageUsedBytes, row.itemCount, row.syncStatus, row.errorMessage]
+  );
+}
+
+// Same pairing again, targeting connection_outlook_contacts — kept separate from the calendar pair
+// above for the same reason: no function here branches on "which Outlook resource."
+async function pruneStaleOutlookContacts(connectionId: string, currentIds: string[]): Promise<void> {
+  await query(`DELETE FROM connection_outlook_contacts WHERE connection_id = $1 AND NOT (graph_user_id = ANY($2::text[]))`, [
+    connectionId,
+    currentIds,
+  ]);
+}
+
+async function upsertOutlookContact(connectionId: string, row: ConnectionUserUpsert): Promise<void> {
+  await query(
+    `INSERT INTO connection_outlook_contacts
        (connection_id, graph_user_id, upn, display_name, storage_used_bytes, item_count, sync_status, error_message, last_synced_at)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8, now())
      ON CONFLICT (connection_id, graph_user_id) DO UPDATE SET
@@ -161,8 +218,27 @@ async function syncTeams(client: Awaited<ReturnType<typeof graphClientForTenant>
   return failed;
 }
 
+/**
+ * Runs Mail, then Calendar, then Contacts as three separate, sequential runThrottled passes over
+ * the same user list — never a single pass that Promise.all's all three Graph calls together per
+ * item. Keeps them genuinely separate Graph operations (own label, own failure handling, own
+ * table), the same way jobs/cleaningScanWorker.ts's runStructureScan already runs two separate
+ * passes (teams→channels, users→chats) inside one job rather than interleaving them.
+ *
+ * Bundled into this one sync_jobs row (not three) per product decision: Outlook's existing "Sync
+ * Now" stays one button. sync_jobs.total_users/processed_users are shared with routes/
+ * cloudConnections.ts's GET /manage (Manage Clouds' "X out of Y Mailboxes"), which — like every
+ * other cloud type — expects processed_users to reach total_users exactly once per real user, not
+ * once per (user, phase). So total_users stays users.length (set by the caller, unchanged), and
+ * only the last pass (Contacts) increments processed_users — Mail/Calendar still do their own full
+ * work and DB writes, they just don't touch the shared counter, so it can't overshoot total_users
+ * or corrupt Manage Clouds' math the way an earlier version of this function did (confirmed live:
+ * it showed "0 out of 1,185 Mailboxes" instead of the real 395).
+ */
 async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, users: BasicUser[]): Promise<number> {
   let failed = 0;
+
+  // connection_users is already pruned by the caller (shared with onedrive/teams) before syncOutlook runs.
   await runThrottled(users, (user) => getUserMailSummary(client, user.id), {
     isCancelled: () => isCancelled(syncJobId),
     label: "Outlook-Mail",
@@ -191,9 +267,83 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
           errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
         });
       }
+      // Deliberately no processed_users increment here — see this function's doc comment.
+    },
+  });
+
+  await pruneStaleOutlookCalendars(connectionId, users.map((u) => u.id));
+  await runThrottled(users, (user) => getUserCalendarEventCount(client, user.id), {
+    isCancelled: () => isCancelled(syncJobId),
+    label: "Outlook-Calendar",
+    // Unlike Mail's single mailFolders call, this is enumerate-calendars-then-paginate-events-per-
+    // calendar — confirmed by live testing to throttle far more aggressively than a flat call (the
+    // same lesson cleaningScanWorker.ts already learned for Teams chat listing, batchSize: 5) — 40
+    // concurrent workers drove the sync into a near-standstill of repeated timeouts/429s.
+    batchSize: 8,
+    onItemSettled: async (user, result) => {
+      if (result.ok && result.value !== null) {
+        await upsertOutlookCalendar(connectionId, {
+          graphUserId: user.id,
+          upn: user.upn,
+          displayName: user.displayName,
+          storageUsedBytes: 0,
+          itemCount: result.value.itemCount,
+          syncStatus: "synced",
+          errorMessage: null,
+        });
+      } else {
+        failed++;
+        await upsertOutlookCalendar(connectionId, {
+          graphUserId: user.id,
+          upn: user.upn,
+          displayName: user.displayName,
+          storageUsedBytes: 0,
+          itemCount: 0,
+          syncStatus: "failed",
+          errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
+        });
+      }
+      // Deliberately no processed_users increment here either — see this function's doc comment.
+    },
+  });
+
+  await pruneStaleOutlookContacts(connectionId, users.map((u) => u.id));
+  await runThrottled(users, (user) => getUserContactCount(client, user.id), {
+    isCancelled: () => isCancelled(syncJobId),
+    label: "Outlook-Contacts",
+    // Same reasoning as the Calendar pass above — a folder-BFS-then-paginate-per-folder call is
+    // heavier than Mail's flat call, so it gets the same conservative concurrency rather than
+    // waiting to hit the same throttling wall Calendar just did.
+    batchSize: 8,
+    onItemSettled: async (user, result) => {
+      if (result.ok && result.value !== null) {
+        await upsertOutlookContact(connectionId, {
+          graphUserId: user.id,
+          upn: user.upn,
+          displayName: user.displayName,
+          storageUsedBytes: 0,
+          itemCount: result.value.itemCount,
+          syncStatus: "synced",
+          errorMessage: null,
+        });
+      } else {
+        failed++;
+        await upsertOutlookContact(connectionId, {
+          graphUserId: user.id,
+          upn: user.upn,
+          displayName: user.displayName,
+          storageUsedBytes: 0,
+          itemCount: 0,
+          syncStatus: "failed",
+          errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
+        });
+      }
+      // The one place this function increments the shared counter — see this function's doc
+      // comment for why Mail/Calendar deliberately don't.
       await query(`UPDATE sync_jobs SET processed_users = processed_users + 1 WHERE id = $1`, [syncJobId]);
     },
   });
+
   return failed;
 }
 

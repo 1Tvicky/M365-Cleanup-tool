@@ -63,28 +63,62 @@ export interface CleaningTeamsSummary {
   countScan: CleaningScanRow | null;
 }
 
-/** Cleanup (deletion) execution phase — see docs/cleanup-execution plan. onedrive_account/sharepoint_site/outlook_mailbox are actually executed against Graph; channel/chat always resolve to 'unsupported' (Microsoft Graph has no application-permission path to delete Teams channel/chat messages — delegated-only). For outlook_mailbox, "delete" means delete every message in every folder — distinguished folders (Inbox, Sent Items, etc.) can't be deleted themselves, only emptied. */
-export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "channel" | "chat";
+/**
+ * Cleanup (deletion) execution phase — see docs/cleanup-execution plan. onedrive_account/
+ * sharepoint_site/outlook_mailbox/outlook_calendar/outlook_contacts are actually executed against
+ * Graph; channel/chat always resolve to 'unsupported' (Microsoft Graph has no application-
+ * permission path to delete Teams channel/chat messages — delegated-only). For outlook_mailbox,
+ * "delete" means delete every message in every folder — distinguished folders (Inbox, Sent Items,
+ * etc.) can't be deleted themselves, only emptied. outlook_calendar/outlook_contacts are the same
+ * mailbox-level granularity: selecting a user deletes all of *their* calendar events / contacts
+ * across every calendar/contact folder they have — never the calendars or folders themselves.
+ */
+export type CleanupResourceType =
+  | "onedrive_account"
+  | "sharepoint_site"
+  | "outlook_mailbox"
+  | "outlook_calendar"
+  | "outlook_contacts"
+  | "channel"
+  | "chat";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 
-/** One slot per resource family; `ids` reference the same internal row ids already used by the existing selection state (connection_users.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
+/** One slot per resource family; `ids` reference the same internal row ids already used by the existing selection state (connection_users.id / connection_outlook_calendars.id / connection_outlook_contacts.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
 export interface CleanupManifest {
   oneDrive?: { connectionId: string; ids: string[] };
   sharePoint?: { connectionId: string; ids: string[] };
   outlook?: { connectionId: string; ids: string[] };
+  outlookCalendar?: { connectionId: string; ids: string[] };
+  outlookContacts?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
   valid: boolean;
-  summary: { oneDriveAccounts: number; sharePointSites: number; outlookMailboxes: number; channels: number; chats: number };
+  summary: {
+    oneDriveAccounts: number;
+    sharePointSites: number;
+    outlookMailboxes: number;
+    outlookCalendars: number;
+    outlookContacts: number;
+    channels: number;
+    chats: number;
+  };
   /** Selected items that can never be executed under this app's Graph permissions — reported here, not in errors, since selecting them isn't invalid, just not actionable yet. */
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
   /** Ids (from the submitted manifest) that resolved successfully, grouped by slot — lets the frontend reconcile a selection against the latest sync (drop ids no longer found) without a separate endpoint. */
-  foundIds: { oneDrive: string[]; sharePoint: string[]; outlook: string[]; channels: string[]; chats: string[] };
+  foundIds: {
+    oneDrive: string[];
+    sharePoint: string[];
+    outlook: string[];
+    outlookCalendar: string[];
+    outlookContacts: string[];
+    channels: string[];
+    chats: string[];
+  };
 }
 
 export interface CleanupOperationRow {
@@ -118,6 +152,9 @@ export interface CleanupOperationItemRow {
   completedAt: string | null;
   errorCode: string | null;
   errorMessage: string | null;
+  /** How many individual files/messages/events/contacts this item covers, and how many have settled (succeeded OR failed) so far — filesCompleted is "settled", not "succeeded"; a genuinely-succeeded count would need a separate per-status query this list route doesn't do. 0/0 until file enumeration for this item has started. */
+  filesTotal: number;
+  filesCompleted: number;
 }
 
 export interface CleanupProgress extends CleanupOperationRow {
@@ -136,6 +173,16 @@ export interface CleanupRecentFile {
   resourceName: string;
   status: "deleted" | "already_gone" | "failed";
   completedAt: string;
+}
+
+/** One row of one item's file list — the third drill-down level (operation → item → file) on the progress/results screens. Unlike CleanupRecentFile (always-completed, operation-wide), this can be 'pending' since it's scoped to one item and may be read while that item is still being processed. */
+export interface CleanupItemFileRow {
+  id: string;
+  fileName: string;
+  status: "pending" | "deleted" | "already_gone" | "failed";
+  fileSizeBytes: number;
+  errorMessage: string | null;
+  completedAt: string | null;
 }
 
 /**
