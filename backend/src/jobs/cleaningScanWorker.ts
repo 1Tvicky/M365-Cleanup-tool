@@ -63,6 +63,7 @@ async function runStructureScan(
   const channelIds: string[] = [];
   await runThrottled(teams, (team) => listChannels(client, team.id), {
     isCancelled: () => isCancelled(scanId),
+    label: "Teams",
     onItemSettled: async (team, result) => {
       if (result.ok) {
         for (const channel of result.value) {
@@ -85,6 +86,7 @@ async function runStructureScan(
   const chatsById = new Map<string, ChatSummary>();
   await runThrottled(users, (user) => listUserChats(client, user.id), {
     isCancelled: () => isCancelled(scanId),
+    label: "Teams",
     // Teams chat listing throttles far more aggressively than most Graph resources (observed:
     // roughly 10 requests/10s tenant-wide) — a smaller batch means fewer wasted, immediately-
     // throttled attempts, not a change to the total number of users still to enumerate.
@@ -144,6 +146,7 @@ async function runMessageCountScan(
 
   await runThrottled(pendingChannels.rows, (row) => countChannelMessages(client, row.team_id, row.channel_id), {
     isCancelled: () => isCancelled(scanId),
+    label: "Teams",
     batchSize: 10, // paginating full message+reply history per channel is heavier than a plain list call
     onItemSettled: async (row, result) => {
       if (result.ok) {
@@ -164,6 +167,7 @@ async function runMessageCountScan(
 
   await runThrottled(pendingChats.rows, (row) => countChatMessages(client, row.chat_id), {
     isCancelled: () => isCancelled(scanId),
+    label: "Teams",
     batchSize: 5, // same chats infrastructure as listUserChats — same tight throttle
     onItemSettled: async (row, result) => {
       if (result.ok) {

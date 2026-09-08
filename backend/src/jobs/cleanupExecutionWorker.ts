@@ -80,6 +80,7 @@ async function executeItem(
   let firstError: unknown = null;
   await runThrottled(children, (child) => deleteDriveItem(client, kind, ownerId, child.id), {
     isCancelled: () => isCancelled(operationId),
+    label: item.resource_type === "onedrive_account" ? "OneDrive" : "SharePoint",
     batchSize: 10,
     onItemSettled: async (child, result) => {
       const fileStatus = result.ok ? result.value : "failed"; // "deleted" | "already_gone" | "failed"
@@ -130,6 +131,7 @@ async function executeMailboxItem(
   let firstError: unknown = null;
   await runThrottled(messages, ({ message }) => deleteMessage(client, userId, message.id), {
     isCancelled: () => isCancelled(operationId),
+    label: "Outlook-Mail",
     batchSize: 10,
     onItemSettled: async ({ message }, result) => {
       const fileStatus = result.ok ? result.value : "failed"; // "deleted" | "already_gone" | "failed"

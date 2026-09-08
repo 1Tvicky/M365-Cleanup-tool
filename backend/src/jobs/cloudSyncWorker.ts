@@ -88,6 +88,7 @@ async function syncOneDrive(client: Awaited<ReturnType<typeof graphClientForTena
   let failed = 0;
   await runThrottled(users, (user) => getUserDriveQuota(client, user.id), {
     isCancelled: () => isCancelled(syncJobId),
+    label: "OneDrive",
     // A single-object drive-quota GET is one of the lightest calls this app makes to Graph, and
     // unlike Teams chat listing it isn't known to be throttled more aggressively tenant-wide — doubling
     // the default concurrency roughly halves wall-clock time for large tenants (hundreds of accounts).
@@ -130,6 +131,7 @@ async function syncTeams(client: Awaited<ReturnType<typeof graphClientForTenant>
   let failed = 0;
   await runThrottled(users, (user) => getUserJoinedTeamsCount(client, user.id), {
     isCancelled: () => isCancelled(syncJobId),
+    label: "Teams",
     onItemSettled: async (user, result) => {
       if (result.ok) {
         await upsertConnectionUser(connectionId, {
@@ -163,6 +165,7 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
   let failed = 0;
   await runThrottled(users, (user) => getUserMailSummary(client, user.id), {
     isCancelled: () => isCancelled(syncJobId),
+    label: "Outlook-Mail",
     // Same reasoning as syncOneDrive's batchSize bump — a mail-folder listing is a comparably light call.
     batchSize: 40,
     onItemSettled: async (user, result) => {
@@ -199,6 +202,7 @@ async function syncSharePoint(client: Awaited<ReturnType<typeof graphClientForTe
   let failed = 0;
   await runThrottled(sites, (site) => getSiteDriveQuota(client, site.id), {
     isCancelled: () => isCancelled(syncJobId),
+    label: "SharePoint",
     // Same reasoning as syncOneDrive's batchSize bump — this is often the largest resource count
     // (thousands of sites), so it benefits the most from higher concurrency.
     batchSize: 40,

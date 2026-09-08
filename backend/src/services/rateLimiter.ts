@@ -24,10 +24,13 @@ export async function runThrottled<T, R>(
      * requests at once.
      */
     batchSize?: number;
+    /** Tags the throttle/backoff console warnings below with which workload made the call (e.g. "OneDrive", "Outlook-Mail") — see the isolation assessment's logging requirement. Defaults to the generic "graph" for call sites that don't pass one. */
+    label?: string;
   } = {}
 ): Promise<void> {
   const { maxRetries, baseBackoffMs, maxBackoffMs, callTimeoutMs } = config.graph;
   const batchSize = opts.batchSize ?? config.graph.batchSize;
+  const label = opts.label ?? "graph";
 
   for (let i = 0; i < items.length; i += batchSize) {
     if (await opts.isCancelled?.()) return;
@@ -46,7 +49,7 @@ export async function runThrottled<T, R>(
             if (retryAfter !== null && attempt < maxRetries) {
               // Deliberately just status/attempt/wait — never the request body or auth header,
               // which is where a token could leak.
-              console.warn(`[graph] throttled (429/503), attempt ${attempt + 1}/${maxRetries}, waiting ${retryAfter}s`);
+              console.warn(`[${label}] throttled (429/503), attempt ${attempt + 1}/${maxRetries}, waiting ${retryAfter}s`);
               opts.onThrottle?.({ retryAfterSeconds: retryAfter });
               await sleep(retryAfter * 1000);
               attempt++;
@@ -56,7 +59,7 @@ export async function runThrottled<T, R>(
               const backoff = Math.min(baseBackoffMs * 2 ** attempt, maxBackoffMs);
               const jitter = Math.random() * backoff * 0.25;
               const reason = err instanceof GraphCallTimeoutError ? "timeout" : "transient error";
-              console.warn(`[graph] ${reason}, attempt ${attempt + 1}/${maxRetries}, backing off ${Math.round(backoff + jitter)}ms`);
+              console.warn(`[${label}] ${reason}, attempt ${attempt + 1}/${maxRetries}, backing off ${Math.round(backoff + jitter)}ms`);
               await sleep(backoff + jitter);
               attempt++;
               continue;

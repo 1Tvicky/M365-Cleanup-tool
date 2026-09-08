@@ -34,10 +34,27 @@ import type {
 export const cleaningRouter = Router();
 cleaningRouter.use(requireSession);
 
-/** Copied verbatim from routes/cloudConnections.ts rather than importing, to avoid touching that file at all. */
-async function requireConnectionAccess(connectionId: string, operatorId: string): Promise<{ tenantId: string }> {
-  const result = await query<{ tenant_id: string; has_access: boolean }>(
-    `SELECT c.tenant_id, (tr.operator_id IS NOT NULL) AS has_access
+/**
+ * The single security gate for every connection-scoped route in this file — verifies, in one query,
+ * that (1) the connection exists, (2) the operator has a tenant_roles row for its tenant, and, when
+ * `expectedCloudType` is passed, (3) the connection is actually that cloud type. All three failure
+ * modes return the exact same 404 CONNECTION_NOT_FOUND — a SharePoint connection requested through
+ * an Outlook route is indistinguishable from a connection that doesn't exist at all, never a
+ * distinguishing 400 that would leak "this id is valid, just the wrong type." This is what gives
+ * every OneDrive/SharePoint/Teams/Outlook workload its own hard connection-type boundary: a
+ * connectionId that resolves to the wrong cloud_type (or a tenant this operator has no role in)
+ * never reaches a workload's discovery/service code at all, regardless of which route it was
+ * pointed at. Copied in spirit from routes/cloudConnections.ts's own (still separate, still
+ * cloud-type-agnostic on purpose — see its docstring) version rather than importing, to avoid
+ * touching that file at all.
+ */
+async function requireConnectionAccess(
+  connectionId: string,
+  operatorId: string,
+  expectedCloudType?: CloudType
+): Promise<{ tenantId: string; cloudType: CloudType }> {
+  const result = await query<{ tenant_id: string; cloud_type: CloudType; has_access: boolean }>(
+    `SELECT c.tenant_id, c.cloud_type, (tr.operator_id IS NOT NULL) AS has_access
      FROM connections c
      LEFT JOIN tenant_roles tr ON tr.tenant_id = c.tenant_id AND tr.operator_id = $2
      WHERE c.id = $1`,
@@ -45,21 +62,10 @@ async function requireConnectionAccess(connectionId: string, operatorId: string)
   );
   const row = result.rows[0];
   if (!row || !row.has_access) throw new ApiError(404, "CONNECTION_NOT_FOUND", "No such connection");
-  return { tenantId: row.tenant_id };
-}
-
-/** Resolves the Graph-callable tenant GUID for a connection already verified via requireConnectionAccess — never derived from anything frontend-supplied. */
-async function resolveConnection(connectionId: string, expectedCloudType: CloudType): Promise<{ m365TenantId: string }> {
-  const result = await query<{ cloud_type: CloudType; m365_tenant_id: string }>(
-    `SELECT c.cloud_type, t.m365_tenant_id FROM connections c JOIN tenants t ON t.id = c.tenant_id WHERE c.id = $1`,
-    [connectionId]
-  );
-  const row = result.rows[0];
-  if (!row) throw new ApiError(404, "CONNECTION_NOT_FOUND", "No such connection");
-  if (row.cloud_type !== expectedCloudType) {
-    throw new ApiError(400, "WRONG_CLOUD_TYPE", `This connection is ${row.cloud_type}, not ${expectedCloudType}`);
+  if (expectedCloudType && row.cloud_type !== expectedCloudType) {
+    throw new ApiError(404, "CONNECTION_NOT_FOUND", "No such connection");
   }
-  return { m365TenantId: row.m365_tenant_id };
+  return { tenantId: row.tenant_id, cloudType: row.cloud_type };
 }
 
 function toScanRow(r: {
@@ -185,8 +191,7 @@ async function listCleaningResources(
 cleaningRouter.get(
   "/connections/:id/onedrive",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "onedrive");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "onedrive");
     const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
     res.json({ accounts: rows, total, page, pageSize });
   })
@@ -196,8 +201,7 @@ cleaningRouter.get(
 cleaningRouter.get(
   "/connections/:id/sharepoint",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "sharepoint");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "sharepoint");
     const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
     res.json({ sites: rows, total, page, pageSize });
   })
@@ -207,8 +211,7 @@ cleaningRouter.get(
 cleaningRouter.get(
   "/connections/:id/outlook",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "outlook");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "outlook");
     const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
     res.json({ mailboxes: rows, total, page, pageSize });
   })
@@ -265,8 +268,7 @@ async function startScan(connectionId: string, scanType: "teams_structure" | "me
 cleaningRouter.get(
   "/connections/:id/teams/summary",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "teams");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "teams");
     const connectionId = req.params.id!;
 
     let structureScan = await latestScan(connectionId, "teams_structure");
@@ -324,8 +326,7 @@ cleaningRouter.get(
 cleaningRouter.get(
   "/connections/:id/teams/channels",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "teams");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "teams");
     const { search, page, pageSize } = parsePageQuery(req);
     const searchClause = `($2::text IS NULL OR team_name ILIKE '%' || $2 || '%' OR channel_name ILIKE '%' || $2 || '%')`;
 
@@ -363,8 +364,7 @@ cleaningRouter.get(
 cleaningRouter.get(
   "/connections/:id/teams/dms",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "teams");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "teams");
     const { search, page, pageSize } = parsePageQuery(req);
     const searchClause = `($2::text IS NULL OR participants::text ILIKE '%' || $2 || '%')`;
 
@@ -401,8 +401,7 @@ cleaningRouter.get(
 cleaningRouter.post(
   "/connections/:id/teams/calculate-counts",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-    await resolveConnection(req.params.id!, "teams");
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "teams");
     const connectionId = req.params.id!;
 
     const running = await query(`SELECT 1 FROM cleaning_scans WHERE connection_id = $1 AND scan_type = 'message_counts' AND status IN ('queued','running') LIMIT 1`, [
@@ -491,17 +490,23 @@ interface Queryable {
  * under) and snapshots the Graph-facing ref + display name needed at execution time. Accepts a
  * `Queryable` so it can run against the plain pool (for /validate) or a transaction client (for
  * the real, TOCTOU-safe snapshot inside POST /cleanup) with identical logic.
+ *
+ * Re-verifies operator access + cloud type per slot via requireConnectionAccess, even though
+ * resolveManifestTenant already checked access for every connectionId in the manifest once,
+ * up front — defense-in-depth (each slot is independently authorized at the point it's actually
+ * used), not a replacement for that first check.
  */
 async function resolveManifestItems(
   manifest: CleanupManifest,
-  db: Queryable
+  db: Queryable,
+  operatorId: string
 ): Promise<{ items: ResolvedManifestItem[]; errors: string[]; foundIds: CleanupValidationResult["foundIds"] }> {
   const items: ResolvedManifestItem[] = [];
   const errors: string[] = [];
   const foundIds: CleanupValidationResult["foundIds"] = { oneDrive: [], sharePoint: [], outlook: [], channels: [], chats: [] };
 
   if (manifest.oneDrive) {
-    await resolveConnection(manifest.oneDrive.connectionId, "onedrive");
+    await requireConnectionAccess(manifest.oneDrive.connectionId, operatorId, "onedrive");
     const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
       `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
       [manifest.oneDrive.connectionId, manifest.oneDrive.ids]
@@ -526,7 +531,7 @@ async function resolveManifestItems(
   }
 
   if (manifest.sharePoint) {
-    await resolveConnection(manifest.sharePoint.connectionId, "sharepoint");
+    await requireConnectionAccess(manifest.sharePoint.connectionId, operatorId, "sharepoint");
     const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
       `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
       [manifest.sharePoint.connectionId, manifest.sharePoint.ids]
@@ -552,7 +557,7 @@ async function resolveManifestItems(
   }
 
   if (manifest.outlook) {
-    await resolveConnection(manifest.outlook.connectionId, "outlook");
+    await requireConnectionAccess(manifest.outlook.connectionId, operatorId, "outlook");
     const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
       `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
       [manifest.outlook.connectionId, manifest.outlook.ids]
@@ -577,7 +582,7 @@ async function resolveManifestItems(
   }
 
   if (manifest.channels) {
-    await resolveConnection(manifest.channels.connectionId, "teams");
+    await requireConnectionAccess(manifest.channels.connectionId, operatorId, "teams");
     const result = await db.query<{ id: string; team_id: string; team_name: string; channel_id: string; channel_name: string }>(
       `SELECT id, team_id, team_name, channel_id, channel_name FROM cleaning_channels WHERE connection_id = $1 AND is_active AND id = ANY($2::uuid[])`,
       [manifest.channels.connectionId, manifest.channels.ids]
@@ -603,7 +608,7 @@ async function resolveManifestItems(
   }
 
   if (manifest.chats) {
-    await resolveConnection(manifest.chats.connectionId, "teams");
+    await requireConnectionAccess(manifest.chats.connectionId, operatorId, "teams");
     const result = await db.query<{ id: string; chat_id: string; participants: { displayName: string | null; upn: string | null }[] }>(
       `SELECT id, chat_id, participants FROM cleaning_chats WHERE connection_id = $1 AND is_active AND id = ANY($2::uuid[])`,
       [manifest.chats.connectionId, manifest.chats.ids]
@@ -648,7 +653,7 @@ cleaningRouter.post(
   asyncHandler(async (req, res) => {
     const manifest = cleanupManifestSchema.parse(req.body);
     await resolveManifestTenant(manifest, req.session!.operatorId); // authorizes every referenced connection; tenant itself isn't needed for a read-only validation
-    const { items, errors, foundIds } = await resolveManifestItems(manifest, { query });
+    const { items, errors, foundIds } = await resolveManifestItems(manifest, { query }, req.session!.operatorId);
 
     const result: CleanupValidationResult = {
       valid: errors.length === 0,
@@ -739,7 +744,7 @@ cleaningRouter.post(
 
       // Re-resolve for real here — never trust any earlier client-side validation for what
       // actually gets written, closing the window between validation and commit.
-      const { items: freshItems, errors: freshErrors } = await resolveManifestItems(manifest, db);
+      const { items: freshItems, errors: freshErrors } = await resolveManifestItems(manifest, db, operatorId);
       if (freshErrors.length > 0) {
         throw new ApiError(400, "VALIDATION_FAILED", "Your selection has changed and needs to be reviewed again", { errors: freshErrors });
       }

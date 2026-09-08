@@ -86,6 +86,37 @@ screens show the full requested list to the customer's Global Admin, and an over
 #1 reason customers stall or reject consent. (`Mail.ReadWrite` is in the table above, for the
 Outlook cloud specifically — don't read this line as still excluding it.)
 
+### 3a. Where per-workload isolation actually lives (and where it doesn't)
+
+There is **one** Entra App Registration for this whole tool (§0 above), and admin consent (§4a) is
+granted **once, tenant-wide, covering the entire permission table above at once** — not a separate
+consent screen per workload. This means the Microsoft-side trust boundary is *"this tenant has
+consented to this app"*, not *"this tenant has consented to this app for OneDrive specifically"*.
+Once a tenant has connected **any** cloud (i.e. completed the one consent screen once), the resulting
+Graph token (`graph/client.ts`'s `graphClientForTenant`) is, at the raw HTTP-client level, capable of
+calling any endpoint in the table above — a OneDrive-only customer's token could technically be used
+to call `/mailFolders` too.
+
+**What actually enforces "connect OneDrive, only OneDrive is accessible" is the application layer**,
+not Azure AD:
+- Every workload's Graph calls live in their own dedicated functions with hard-coded paths
+  (`graph/cloudEnumeration.ts`, `graph/cleanupDeletion.ts`) — there is no generic
+  `callGraph(cloudType, ...)` anywhere that a bug could point at the wrong endpoint.
+- Every connection-scoped route calls `requireConnectionAccess(connectionId, operatorId,
+  expectedCloudType)` (`routes/cleaning.ts`) before touching anything — one query verifying the
+  connection exists, the operator has a `tenant_roles` row for its tenant, *and* the connection's
+  actual `cloud_type` matches what the route expects, all collapsing to the same 404 on failure.
+- The `connections` table row (one per `(tenant_id, cloud_type)`) is this app's own bookkeeping of
+  which workloads a customer has explicitly opted into — it is **not** a Microsoft-Graph-level
+  permission boundary, just the thing every route checks before doing anything.
+
+If a workload-level *Microsoft-side* consent boundary is ever required (not just an
+application-level one), that needs separate Entra App Registrations per workload — a materially
+bigger change (separate client IDs/secrets/redirect URIs, and every already-connected tenant having
+to re-consent from scratch, since a new app registration has no relationship to a tenant's existing
+grant). Not done today; flagging so a future reader doesn't assume more isolation than the
+architecture actually provides.
+
 ## 4. Admin consent flow — legacy, superseded by §4a
 
 *(Kept live for compatibility with existing connected tenants and the Cleanup module's current
