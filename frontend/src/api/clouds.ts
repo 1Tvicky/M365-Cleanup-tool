@@ -35,6 +35,32 @@ export interface ConnectionUserRow {
   errorMessage: string | null;
 }
 
+/** One resource available to sync — a live Graph id, not a connection_users row id (the browse step must work even before anything's ever been synced). */
+export interface AvailableResourceRow {
+  id: string;
+  displayName: string;
+  secondary?: string;
+}
+
+export type SyncJobResourceStatus = "pending" | "processing" | "completed" | "failed" | "cancelled";
+
+/** One selected resource's progress within a resource-scoped sync run. */
+export interface SyncJobResourceRow {
+  id: string;
+  graphResourceId: string;
+  displayName: string;
+  secondary: string | null;
+  status: SyncJobResourceStatus;
+  errorMessage: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
+export interface ResyncSkippedResource {
+  id: string;
+  reason: "not_found" | "already_syncing";
+}
+
 export type M365ConnectMessage =
   | { type: "m365-connect-complete"; status: "success"; connectionId: string; cloudType: CloudType }
   | { type: "m365-connect-complete"; status: "error"; cloudType: CloudType | null; reason: string };
@@ -64,8 +90,37 @@ export function initCloudConnect(cloudType: CloudType): Promise<{ authorizeUrl: 
   return rawFetch(`/api/clouds/${cloudType}/connect/init`, { method: "POST" });
 }
 
-export function resyncCloudConnection(connectionId: string): Promise<{ jobId: string; status: "queued" }> {
-  return rawFetch(`/api/clouds/${connectionId}/resync`, { method: "POST" });
+/**
+ * Omit `resourceIds` (or pass none) for the plain "sync everything" action the existing Resync icon
+ * uses; pass a non-empty array to scope the run to just those resources (the "Sync Selected" flow).
+ * `skipped` reports any requested id the backend rejected (not found for this connection, or already
+ * being synced by another in-flight job) — the caller should surface those, never assume acceptance.
+ */
+export function resyncCloudConnection(
+  connectionId: string,
+  resourceIds?: string[]
+): Promise<{ jobId: string; status: "queued"; acceptedCount: number; skipped: ResyncSkippedResource[] }> {
+  return rawFetch(`/api/clouds/${connectionId}/resync`, {
+    method: "POST",
+    body: resourceIds ? JSON.stringify({ resourceIds }) : undefined,
+  });
+}
+
+/** The browse step for resource-level sync — every resource this workload currently has in Microsoft 365 (live, cached briefly server-side), not just what's already synced. Same page/pageSize convention as api/cleaning.ts's discovery routes, so it plugs directly into DiscoveryTable. */
+export function listAvailableResources(
+  connectionId: string,
+  opts: { search?: string; page?: number; pageSize?: number } = {}
+): Promise<{ resources: AvailableResourceRow[]; total: number; page: number; pageSize: number }> {
+  const params = new URLSearchParams();
+  if (opts.search) params.set("search", opts.search);
+  params.set("page", String(opts.page ?? 1));
+  params.set("pageSize", String(opts.pageSize ?? 20));
+  return rawFetch(`/api/clouds/${connectionId}/available-resources?${params.toString()}`);
+}
+
+/** Per-resource progress for one resource-scoped sync run — empty for a legacy/tenant-wide run (pre-this-change history, or a plain Resync), the caller falls back to the aggregate total_users/processed_users bar in that case. */
+export function getSyncJobResources(connectionId: string, jobId: string): Promise<{ resources: SyncJobResourceRow[] }> {
+  return rawFetch(`/api/clouds/${connectionId}/sync-jobs/${jobId}/resources`);
 }
 
 export function disconnectCloudConnection(connectionId: string): Promise<void> {

@@ -44,6 +44,28 @@ export interface ConnectionUserRow {
   errorMessage: string | null;
 }
 
+/** One resource available to sync for a workload — the id is a live Graph id, not a connection_users row id, since the browse step must work even before anything has ever been synced. */
+export interface AvailableResourceRow {
+  id: string;
+  displayName: string;
+  /** Secondary label shown alongside displayName — UPN for onedrive/outlook/teams-members-N/A, webUrl for sharepoint. Omitted where not meaningful. */
+  secondary?: string;
+}
+
+export type SyncJobResourceStatus = "pending" | "processing" | "completed" | "failed" | "cancelled";
+
+/** One selected resource within a resource-scoped sync_jobs run — mirrors CleanupOperationItemRow's relationship to CleanupOperationRow. */
+export interface SyncJobResourceRow {
+  id: string;
+  graphResourceId: string;
+  displayName: string;
+  secondary: string | null;
+  status: SyncJobResourceStatus;
+  errorMessage: string | null;
+  startedAt: string | null;
+  completedAt: string | null;
+}
+
 export interface ConnectInitResponse {
   authorizeUrl: string;
   state: string;

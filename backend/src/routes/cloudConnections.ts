@@ -4,13 +4,22 @@ import { query } from "../db/pool.js";
 import { asyncHandler } from "../middleware/asyncHandler.js";
 import { requireSession } from "../middleware/auth.js";
 import { requireInternalAdmin } from "../middleware/internalAdmin.js";
-import { invalidateTenantTokenCache } from "../graph/client.js";
+import { invalidateTenantTokenCache, graphClientForTenant } from "../graph/client.js";
 import { exchangeM365ConnectCode, getM365ConnectAuthorizeUrl } from "../services/m365ConnectAuth.js";
 import { consumeConnectAttempt, InvalidOAuthStateError, startConnectAttempt } from "../services/oauthState.js";
 import { encryptToken } from "../services/tokenEncryption.js";
 import { enqueueCloudSyncJob } from "../jobs/queue.js";
+import { getSiteById, getTeamById, getUserById, listAllTeams, listAllUsers, searchSites } from "../graph/cloudEnumeration.js";
 import { ApiError } from "../types/index.js";
-import { CLOUD_TYPES, isCloudType, type CloudType, type ConnectionUserRow, type ManageCloudsRow } from "../types/connections.js";
+import {
+  CLOUD_TYPES,
+  isCloudType,
+  type AvailableResourceRow,
+  type CloudType,
+  type ConnectionUserRow,
+  type ManageCloudsRow,
+  type SyncJobResourceRow,
+} from "../types/connections.js";
 
 export const cloudConnectionsRouter = Router();
 cloudConnectionsRouter.use(requireSession);
@@ -20,17 +29,84 @@ cloudConnectionsRouter.use(requireSession);
  * the rest of the app uses (middleware/rbac.ts), applied here since connections aren't addressed
  * by :tenantId in the URL the way cleanup routes are.
  */
-async function requireConnectionAccess(connectionId: string, operatorId: string): Promise<{ tenantId: string }> {
-  const result = await query<{ tenant_id: string; has_access: boolean }>(
-    `SELECT c.tenant_id, (tr.operator_id IS NOT NULL) AS has_access
+async function requireConnectionAccess(connectionId: string, operatorId: string): Promise<{ tenantId: string; cloudType: CloudType; m365TenantId: string }> {
+  const result = await query<{ tenant_id: string; cloud_type: CloudType; m365_tenant_id: string; has_access: boolean }>(
+    `SELECT c.tenant_id, c.cloud_type, t.m365_tenant_id, (tr.operator_id IS NOT NULL) AS has_access
      FROM connections c
+     JOIN tenants t ON t.id = c.tenant_id
      LEFT JOIN tenant_roles tr ON tr.tenant_id = c.tenant_id AND tr.operator_id = $2
      WHERE c.id = $1`,
     [connectionId, operatorId]
   );
   const row = result.rows[0];
   if (!row || !row.has_access) throw new ApiError(404, "CONNECTION_NOT_FOUND", "No such connection");
-  return { tenantId: row.tenant_id };
+  return { tenantId: row.tenant_id, cloudType: row.cloud_type, m365TenantId: row.m365_tenant_id };
+}
+
+/**
+ * The cheap, listing-only Graph call for a workload's browsable resources — never the expensive
+ * per-resource sync calls (getUserDriveQuota/getSiteDriveQuota/etc). cloudType is always the
+ * connection's own DB column (via requireConnectionAccess), never taken from the request, so this
+ * can't be pointed at the wrong Graph endpoint by a client.
+ */
+async function listWorkloadResources(client: Awaited<ReturnType<typeof graphClientForTenant>>, cloudType: CloudType): Promise<AvailableResourceRow[]> {
+  if (cloudType === "sharepoint") {
+    const sites = await searchSites(client);
+    return sites.map((s) => ({ id: s.id, displayName: s.displayName, secondary: s.webUrl }));
+  }
+  if (cloudType === "teams") {
+    const teams = await listAllTeams(client);
+    return teams.map((t) => ({ id: t.id, displayName: t.displayName }));
+  }
+  const users = await listAllUsers(client);
+  return users.map((u) => ({ id: u.id, displayName: u.displayName ?? u.upn, secondary: u.upn }));
+}
+
+/**
+ * Direct single-resource lookup, dispatched by the connection's own cloud_type (never the
+ * request's) — used to validate/re-derive a *specific selected* resource without ever paginating
+ * the whole tenant. This is what lets POST /:id/resync confirm a handful of selected ids belong to
+ * this workload without the "enumerate everything, then filter" pattern the resource-level sync
+ * feature exists to eliminate.
+ */
+async function getWorkloadResourceById(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  cloudType: CloudType,
+  id: string
+): Promise<AvailableResourceRow | null> {
+  if (cloudType === "sharepoint") {
+    const site = await getSiteById(client, id);
+    return site ? { id: site.id, displayName: site.displayName, secondary: site.webUrl } : null;
+  }
+  if (cloudType === "teams") {
+    const team = await getTeamById(client, id);
+    return team ? { id: team.id, displayName: team.displayName } : null;
+  }
+  const user = await getUserById(client, id);
+  return user ? { id: user.id, displayName: user.displayName ?? user.upn, secondary: user.upn } : null;
+}
+
+/**
+ * Short-TTL in-process cache for the browse endpoint — same pattern as graph/client.ts's tenant
+ * token cache (a plain Map keyed by a string id, entries carrying their own expiry), a separate
+ * instance since this caches resource *listings* per connection, not Graph access tokens per
+ * tenant. Avoids re-listing (paginating GET /users or /sites, potentially thousands of rows) on
+ * every keystroke of search or page change — never persisted into connection_users, which stays
+ * reserved for "state as of the last real sync," not "what Graph currently reports."
+ */
+const availableResourcesCache = new Map<string, { resources: AvailableResourceRow[]; expiresAt: number }>();
+const AVAILABLE_RESOURCES_TTL_MS = 90_000;
+
+async function getCachedWorkloadResources(
+  connectionId: string,
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  cloudType: CloudType
+): Promise<AvailableResourceRow[]> {
+  const cached = availableResourcesCache.get(connectionId);
+  if (cached && cached.expiresAt > Date.now()) return cached.resources;
+  const resources = await listWorkloadResources(client, cloudType);
+  availableResourcesCache.set(connectionId, { resources, expiresAt: Date.now() + AVAILABLE_RESOURCES_TTL_MS });
+  return resources;
 }
 
 /** POST /api/clouds/:cloudType/connect/init — see docs/azure-ad-app-registration.md §4a. */
@@ -54,7 +130,17 @@ cloudConnectionsRouter.post(
   })
 );
 
-/** GET /api/clouds/manage — one row per (tenant, cloud_type) connection the operator can see. */
+/**
+ * GET /api/clouds/manage — one row per (tenant, cloud_type) connection the operator can see.
+ *
+ * total_users/processed_users used to always come from the single most-recently-created sync_jobs
+ * row (DISTINCT ON (c.id) ... ORDER BY sj.created_at DESC). That stopped being sufficient once
+ * resource-scoped syncs can run concurrently on the same connection (see POST /:id/resync below) —
+ * an older-but-still-running scoped job would otherwise silently disappear from this figure the
+ * moment a second one starts. So: when a connection has any sync_jobs row still queued/running,
+ * SUM across every such row instead of picking just one; otherwise fall back to the single latest
+ * row exactly as before (covers both "no job ever ran" and "last job already finished").
+ */
 cloudConnectionsRouter.get(
   "/manage",
   asyncHandler(async (req, res) => {
@@ -74,14 +160,25 @@ cloudConnectionsRouter.get(
       added_users: string | null;
       not_added_users: string | null;
     }>(
-      `SELECT DISTINCT ON (c.id)
-              c.id, c.cloud_type, c.display_name, c.admin_upn, c.admin_display_name, c.status,
+      `SELECT c.id, c.cloud_type, c.display_name, c.admin_upn, c.admin_display_name, c.status,
               c.connected_at, c.last_synced_at, c.last_error,
-              sj.total_users, sj.processed_users,
+              COALESCE(active.total_users, latest.total_users) AS total_users,
+              COALESCE(active.processed_users, latest.processed_users) AS processed_users,
               cu.total_known_users, cu.added_users, cu.not_added_users
        FROM connections c
        JOIN tenant_roles tr ON tr.tenant_id = c.tenant_id AND tr.operator_id = $1
-       LEFT JOIN sync_jobs sj ON sj.connection_id = c.id
+       LEFT JOIN LATERAL (
+         SELECT SUM(total_users) AS total_users, SUM(processed_users) AS processed_users
+         FROM sync_jobs sj
+         WHERE sj.connection_id = c.id AND sj.status IN ('queued', 'running')
+       ) active ON active.total_users IS NOT NULL
+       LEFT JOIN LATERAL (
+         SELECT sj.total_users, sj.processed_users
+         FROM sync_jobs sj
+         WHERE sj.connection_id = c.id
+         ORDER BY sj.created_at DESC
+         LIMIT 1
+       ) latest ON true
        LEFT JOIN (
          SELECT connection_id,
                 COUNT(*) AS total_known_users,
@@ -90,8 +187,7 @@ cloudConnectionsRouter.get(
          FROM connection_users
          GROUP BY connection_id
        ) cu ON cu.connection_id = c.id
-       WHERE c.status != 'disconnected'
-       ORDER BY c.id, sj.created_at DESC NULLS LAST`,
+       WHERE c.status != 'disconnected'`,
       [req.session!.operatorId]
     );
 
@@ -103,6 +199,7 @@ cloudConnectionsRouter.get(
       // know about" the way this row's headline count needs to be.
       const total = Number(r.total_known_users ?? r.total_users ?? 0);
       const processed = r.processed_users ?? 0;
+      const added = Number(r.added_users ?? 0);
       return {
         id: r.id,
         cloudType: r.cloud_type,
@@ -113,9 +210,17 @@ cloudConnectionsRouter.get(
         tenantDomain: r.display_name,
         totalUsers: total,
         processedUsers: processed,
-        addedUsers: Number(r.added_users ?? 0),
+        addedUsers: added,
         notAddedUsers: Number(r.not_added_users ?? 0),
-        percent: total > 0 ? Math.round((processed / total) * 100) : 0,
+        // Deliberately addedUsers/total, not processedUsers/total: processedUsers is scoped to
+        // whichever single sync_jobs run happens to be "latest" for this connection, which is now
+        // routinely a small resource-scoped run (e.g. 2 of 116) once resource-level sync is the
+        // common case — dividing that by the whole tenant's total_known_users would make this
+        // figure crash toward 0% after every scoped sync, even though addedUsers (this workload's
+        // real, current, whole-tenant synced count from connection_users) hasn't actually dropped.
+        // addedUsers already updates per-resource in real time during an active job too, so this
+        // stays accurate whether idle or mid-sync, unlike processedUsers/total.
+        percent: total > 0 ? Math.round((added / total) * 100) : 0,
         status: r.status,
         multiUser: true,
         connectedAt: r.connected_at,
@@ -163,6 +268,84 @@ cloudConnectionsRouter.get(
         ? { status: row.job_status, totalUsers: row.total_users ?? 0, processedUsers: row.processed_users ?? 0 }
         : null,
     });
+  })
+);
+
+/**
+ * GET /api/clouds/:id/available-resources — the browse step for resource-level sync: every
+ * resource this workload currently has in Microsoft 365 (live, via the cheap listing-only Graph
+ * calls, cached briefly — see getCachedWorkloadResources), NOT what's already synced. Deliberately
+ * separate from GET /:id/users (which reads connection_users, i.e. "as of the last sync" and can be
+ * empty/stale before a first sync or right after the Teams resource-shape change). Search/paging
+ * happen server-side over the cached array, using the same page/pageSize convention as
+ * routes/cleaning.ts's discovery routes (not GET /:id/users' cursor convention) so this plugs
+ * directly into the existing DiscoveryTable component on the frontend.
+ */
+cloudConnectionsRouter.get(
+  "/:id/available-resources",
+  asyncHandler(async (req, res) => {
+    const { cloudType, m365TenantId } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+
+    const client = await graphClientForTenant(m365TenantId);
+    const all = await getCachedWorkloadResources(req.params.id!, client, cloudType);
+
+    const search = typeof req.query.search === "string" ? req.query.search.trim().toLowerCase() : "";
+    const filtered = search
+      ? all.filter((r) => r.displayName.toLowerCase().includes(search) || r.secondary?.toLowerCase().includes(search))
+      : all;
+
+    const pageSize = Math.min(Number(req.query.pageSize) || 20, 200);
+    const page = Math.max(Number(req.query.page) || 1, 1);
+    const resources = filtered.slice((page - 1) * pageSize, page * pageSize);
+
+    res.json({ resources, total: filtered.length, page, pageSize });
+  })
+);
+
+/**
+ * GET /api/clouds/:id/sync-jobs/:jobId/resources — per-resource progress for one resource-scoped
+ * sync run, for the live "N of M completed" view. A job with no rows here is either pre-this-change
+ * history or a legacy full-tenant run (see jobs/cloudSyncWorker.ts) — the frontend falls back to the
+ * existing aggregate total_users/processed_users bar in that case, it doesn't treat an empty list as
+ * an error.
+ */
+cloudConnectionsRouter.get(
+  "/:id/sync-jobs/:jobId/resources",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+
+    const jobRow = await query(`SELECT 1 FROM sync_jobs WHERE id = $1 AND connection_id = $2`, [req.params.jobId, req.params.id]);
+    if (jobRow.rows.length === 0) throw new ApiError(404, "SYNC_JOB_NOT_FOUND", "No such sync job for this connection");
+
+    const result = await query<{
+      id: string;
+      graph_resource_id: string;
+      display_name: string;
+      secondary: string | null;
+      status: SyncJobResourceRow["status"];
+      error_message: string | null;
+      started_at: string | null;
+      completed_at: string | null;
+    }>(
+      `SELECT id, graph_resource_id, display_name, secondary, status, error_message, started_at, completed_at
+       FROM sync_job_resources
+       WHERE sync_job_id = $1
+       ORDER BY display_name`,
+      [req.params.jobId]
+    );
+
+    const resources: SyncJobResourceRow[] = result.rows.map((r) => ({
+      id: r.id,
+      graphResourceId: r.graph_resource_id,
+      displayName: r.display_name,
+      secondary: r.secondary,
+      status: r.status,
+      errorMessage: r.error_message,
+      startedAt: r.started_at,
+      completedAt: r.completed_at,
+    }));
+
+    res.json({ resources });
   })
 );
 
@@ -264,12 +447,21 @@ cloudConnectionsRouter.get(
  * POST /api/clouds/:id/resync — creates a fresh sync_jobs row rather than reusing the last one, so
  * sync history isn't overwritten. connections.last_synced_at updates on completion, not here — see
  * docs/cloud-connections-api.md for why that deviates from a literal "update on resync" reading.
+ *
+ * Optional `resourceIds` in the body scopes the sync to just those resources (the "Sync Selected"
+ * flow) — omitted/empty preserves today's full-tenant behavior exactly (used by the plain "Resync"
+ * icon, which stays a quick "sync everything" action). Resource ids are never trusted as-is: they're
+ * intersected against a fresh live listing (the same one GET /:id/available-resources uses) keyed by
+ * this connection's own cloud_type — never anything the client claims — so a ResourceId that
+ * belongs to a different connection, tenant, or workload is silently excluded (reported in
+ * `skipped`), never synced.
  */
 cloudConnectionsRouter.post(
   "/:id/resync",
   requireInternalAdmin,
   asyncHandler(async (req, res) => {
-    const { tenantId } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const { tenantId, cloudType, m365TenantId } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const requestedIds: string[] = Array.isArray(req.body?.resourceIds) ? req.body.resourceIds.filter((v: unknown) => typeof v === "string") : [];
 
     const connRow = await query<{ status: string }>(`SELECT status FROM connections WHERE id = $1`, [req.params.id]);
     const status = connRow.rows[0]?.status;
@@ -277,13 +469,59 @@ cloudConnectionsRouter.post(
       throw new ApiError(409, "CONNECTION_DISCONNECTED", "This connection is disconnected — reconnect instead of resyncing");
     }
 
-    const running = await query(
-      `SELECT 1 FROM sync_jobs WHERE connection_id = $1 AND status IN ('queued', 'running') LIMIT 1`,
+    // Tier 1: a legacy/full-tenant job (no sync_job_resources rows of its own) touches every
+    // resource, so it still blocks everything regardless of what's being requested now.
+    const legacyRunning = await query(
+      `SELECT 1 FROM sync_jobs sj
+       WHERE sj.connection_id = $1 AND sj.status IN ('queued', 'running')
+         AND NOT EXISTS (SELECT 1 FROM sync_job_resources sjr WHERE sjr.sync_job_id = sj.id)
+       LIMIT 1`,
       [req.params.id]
     );
-    if (running.rows.length > 0) {
+    if (legacyRunning.rows.length > 0) {
       throw new ApiError(409, "RESYNC_ALREADY_RUNNING", "A sync job is already in progress for this connection");
     }
+
+    const acceptedResources: AvailableResourceRow[] = [];
+    const skipped: { id: string; reason: "not_found" | "already_syncing" }[] = [];
+
+    if (requestedIds.length > 0) {
+      // Tier 2: a resource-scoped job only blocks the specific resource ids it's already working on.
+      const alreadySyncing = await query<{ graph_resource_id: string }>(
+        `SELECT DISTINCT sjr.graph_resource_id
+         FROM sync_job_resources sjr
+         JOIN sync_jobs sj ON sj.id = sjr.sync_job_id
+         WHERE sj.connection_id = $1 AND sj.status IN ('queued', 'running')
+           AND sjr.status IN ('pending', 'processing')
+           AND sjr.graph_resource_id = ANY($2::text[])`,
+        [req.params.id, requestedIds]
+      );
+      const lockedIds = new Set(alreadySyncing.rows.map((r) => r.graph_resource_id));
+
+      // Direct per-id lookups, not a full tenant listing — a tenant with thousands of users
+      // selecting 3 must only ever cost 3 Graph calls here, never one that pages the whole tenant.
+      const client = await graphClientForTenant(m365TenantId);
+      for (const id of requestedIds) {
+        if (lockedIds.has(id)) {
+          skipped.push({ id, reason: "already_syncing" });
+          continue;
+        }
+        const resource = await getWorkloadResourceById(client, cloudType, id);
+        if (resource) {
+          acceptedResources.push(resource);
+        } else {
+          skipped.push({ id, reason: "not_found" });
+        }
+      }
+      if (acceptedResources.length === 0) {
+        throw new ApiError(400, "NOTHING_TO_SYNC", "None of the selected resources could be synced");
+      }
+    }
+    // requestedIds empty/absent falls through with acceptedResources still [] — jobs/cloudSyncWorker.ts
+    // treats a sync_jobs row with zero sync_job_resources children as "sync everything," which is
+    // exactly today's behavior and exactly what the plain "Resync" icon (never sends resourceIds)
+    // needs. The frontend's "Sync Selected" button is disabled at 0 selected, so a legitimate caller
+    // never reaches this branch meaning to scope to nothing.
 
     const jobInsert = await query<{ id: string }>(
       `INSERT INTO sync_jobs (connection_id, status) VALUES ($1, 'queued') RETURNING id`,
@@ -291,14 +529,23 @@ cloudConnectionsRouter.post(
     );
     const jobId = jobInsert.rows[0]!.id;
 
+    if (acceptedResources.length > 0) {
+      for (const r of acceptedResources) {
+        await query(
+          `INSERT INTO sync_job_resources (sync_job_id, connection_id, graph_resource_id, display_name, secondary) VALUES ($1, $2, $3, $4, $5)`,
+          [jobId, req.params.id, r.id, r.displayName, r.secondary ?? null]
+        );
+      }
+    }
+
     await query(
       `INSERT INTO connection_events (connection_id, tenant_id, event, operator_id, detail)
        VALUES ($1, $2, 'resync_requested', $3, $4)`,
-      [req.params.id, tenantId, req.session!.operatorId, { syncJobId: jobId }]
+      [req.params.id, tenantId, req.session!.operatorId, { syncJobId: jobId, resourceCount: acceptedResources.length }]
     );
 
     await enqueueCloudSyncJob({ syncJobId: jobId });
-    res.status(202).json({ jobId, status: "queued" });
+    res.status(202).json({ jobId, status: "queued", acceptedCount: acceptedResources.length, skipped });
   })
 );
 

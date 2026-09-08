@@ -13,6 +13,20 @@ export interface BasicUser {
 }
 
 /**
+ * A resource id that doesn't belong to this workload isn't always a clean 404 — Graph rejects a
+ * malformed id (wrong shape/format, e.g. a plain string where a SharePoint site id needs its
+ * composite `hostname,collectionId,siteId` form, confirmed live: "400 invalidRequest — Invalid
+ * hostname for this tenancy") with 400, not 404. Both mean the same thing to a caller asking "is
+ * this a valid resource for this workload" — treat them identically as "no such resource," never
+ * let either surface as an unhandled exception (a client submitting garbage as a resourceId must
+ * get a clean rejection, not a 500).
+ */
+function isResourceNotFoundError(err: unknown): boolean {
+  const status = (err as { statusCode?: number })?.statusCode;
+  return status === 404 || status === 400;
+}
+
+/**
  * Paginates GET /users tenant-wide. Large tenants can have thousands of users — this is the slow
  * part of a OneDrive/Teams sync.
  *
@@ -38,6 +52,24 @@ export async function listAllUsers(client: Client): Promise<BasicUser[]> {
     url = res["@odata.nextLink"];
   }
   return users;
+}
+
+/**
+ * Direct single-object lookup — the resource-scoped Sync flow's validation/re-derivation step uses
+ * this instead of listAllUsers, so confirming a handful of selected ids never requires paginating
+ * the whole tenant (see docs/azure-ad-app-registration.md and the "no accidental tenant-wide
+ * enumeration" requirement this backs). Returns null on a not-found-shaped error (404, or Graph's
+ * 400 for a malformed id — see isResourceNotFoundError), not just a real 404, since a client
+ * submitting garbage as a resourceId must get a clean rejection here, never an unhandled exception.
+ */
+export async function getUserById(client: Client, userId: string): Promise<BasicUser | null> {
+  try {
+    const u: any = await client.api(`/users/${userId}`).select("id,userPrincipalName,displayName").get();
+    return { id: u.id, upn: u.userPrincipalName, displayName: u.displayName ?? null };
+  } catch (err) {
+    if (isResourceNotFoundError(err)) return null;
+    throw err;
+  }
 }
 
 export interface DriveQuota {
@@ -225,6 +257,17 @@ export async function searchSites(client: Client, query = "*"): Promise<SiteSumm
   return sites;
 }
 
+/** Same direct-lookup rationale as getUserById, for SharePoint's site resources. */
+export async function getSiteById(client: Client, siteId: string): Promise<SiteSummary | null> {
+  try {
+    const s: any = await client.api(`/sites/${siteId}`).select("id,webUrl,displayName,name").get();
+    return { id: s.id, webUrl: s.webUrl, displayName: s.displayName ?? s.name ?? s.webUrl };
+  } catch (err) {
+    if (isResourceNotFoundError(err)) return null;
+    throw err;
+  }
+}
+
 export async function getSiteDriveQuota(client: Client, siteId: string): Promise<DriveQuota | null> {
   try {
     const drive: any = await client.api(`/sites/${siteId}/drive`).select("quota,root").get();
@@ -280,6 +323,23 @@ export async function listAllTeams(client: Client): Promise<TeamSummary[]> {
     url = res["@odata.nextLink"];
   }
   return teams;
+}
+
+/**
+ * Same direct-lookup rationale as getUserById, for Teams' team resources. Also re-checks
+ * resourceProvisioningOptions the same way listAllTeams' $filter already does — a plain
+ * GET /groups/{id} would happily return any Microsoft 365 group, Team-provisioned or not, and a
+ * non-Team group id must never be accepted as a valid Teams-workload resource.
+ */
+export async function getTeamById(client: Client, teamId: string): Promise<TeamSummary | null> {
+  try {
+    const g: any = await client.api(`/groups/${teamId}`).select("id,displayName,resourceProvisioningOptions").get();
+    if (!(g.resourceProvisioningOptions as string[] | undefined)?.includes("Team")) return null;
+    return { id: g.id, displayName: g.displayName ?? g.id };
+  } catch (err) {
+    if (isResourceNotFoundError(err)) return null;
+    throw err;
+  }
 }
 
 export interface ChannelSummary {

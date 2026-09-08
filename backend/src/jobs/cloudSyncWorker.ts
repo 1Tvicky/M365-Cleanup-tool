@@ -6,16 +6,52 @@ import {
   getUserCalendarEventCount,
   getUserContactCount,
   getUserDriveQuota,
-  getUserJoinedTeamsCount,
   getUserMailSummary,
+  listAllTeams,
   listAllUsers,
+  listChannels,
   searchSites,
   type BasicUser,
   type SiteSummary,
+  type TeamSummary,
 } from "../graph/cloudEnumeration.js";
 import { runThrottled } from "../services/rateLimiter.js";
 import type { CloudType } from "../types/connections.js";
 import { connection as redis } from "./queue.js";
+
+/**
+ * Maps a resource's own Graph id (user id / site id / team id) to its sync_job_resources.id, for a
+ * resource-scoped sync run. `null` means "this is a legacy/tenant-wide run" (no selection was made,
+ * or this sync_jobs row predates this feature) — every sync* function below skips all
+ * sync_job_resources bookkeeping in that case and behaves exactly as it always has.
+ */
+type ResourceRowMap = Map<string, string> | null;
+
+/** Bulk-marks every selected resource 'processing' right before its pass starts — batched per pass rather than per individual Graph call (which run concurrently within a batch anyway, see rateLimiter.ts), so this doesn't need to reach into runThrottled's per-item timing. */
+async function markProcessing(resourceRows: ResourceRowMap): Promise<void> {
+  if (!resourceRows || resourceRows.size === 0) return;
+  await query(`UPDATE sync_job_resources SET status = 'processing', started_at = now() WHERE id = ANY($1::uuid[])`, [[...resourceRows.values()]]);
+}
+
+/** Records one resource's outcome for a resource-scoped run — a no-op for a legacy/tenant-wide run (resourceRows is null) or a resource id with no matching row (shouldn't happen — every id here came from the same requested set the rows were seeded from). */
+async function settleResource(resourceRows: ResourceRowMap, graphResourceId: string, ok: boolean, errorMessage: string | null): Promise<void> {
+  const rowId = resourceRows?.get(graphResourceId);
+  if (!rowId) return;
+  await query(`UPDATE sync_job_resources SET status = $2, error_message = $3, completed_at = now(), updated_at = now() WHERE id = $1`, [
+    rowId,
+    ok ? "completed" : "failed",
+    errorMessage,
+  ]);
+}
+
+/** Bulk-flips any resources a cancelled run never got to (still 'pending' or 'processing' — a batch mid-flight when cancellation was noticed) to 'cancelled', mirroring how sync_jobs itself already records cancellation. No-op for a legacy/tenant-wide run. */
+async function cancelRemainingResources(syncJobId: string): Promise<void> {
+  await query(
+    `UPDATE sync_job_resources SET status = 'cancelled', completed_at = now(), updated_at = now()
+     WHERE sync_job_id = $1 AND status IN ('pending', 'processing')`,
+    [syncJobId]
+  );
+}
 
 interface ConnectionUserUpsert {
   graphUserId: string;
@@ -141,8 +177,15 @@ async function isCancelled(syncJobId: string): Promise<boolean> {
   return result.rows[0]?.cancel_requested_at != null;
 }
 
-async function syncOneDrive(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, users: BasicUser[]): Promise<number> {
+async function syncOneDrive(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  connectionId: string,
+  syncJobId: string,
+  users: BasicUser[],
+  resourceRows: ResourceRowMap
+): Promise<number> {
   let failed = 0;
+  await markProcessing(resourceRows);
   await runThrottled(users, (user) => getUserDriveQuota(client, user.id), {
     isCancelled: () => isCancelled(syncJobId),
     label: "OneDrive",
@@ -166,8 +209,10 @@ async function syncOneDrive(client: Awaited<ReturnType<typeof graphClientForTena
           syncStatus: "synced",
           errorMessage: null,
         });
+        await settleResource(resourceRows, user.id, true, null);
       } else {
         failed++;
+        const errorMessage = result.ok ? "No OneDrive provisioned for this user" : String(result.error);
         await upsertConnectionUser(connectionId, {
           graphUserId: user.id,
           upn: user.upn,
@@ -175,8 +220,9 @@ async function syncOneDrive(client: Awaited<ReturnType<typeof graphClientForTena
           storageUsedBytes: 0,
           itemCount: 0,
           syncStatus: "failed",
-          errorMessage: result.ok ? "No OneDrive provisioned for this user" : String(result.error),
+          errorMessage,
         });
+        await settleResource(resourceRows, user.id, false, errorMessage);
       }
       await query(`UPDATE sync_jobs SET processed_users = processed_users + 1 WHERE id = $1`, [syncJobId]);
     },
@@ -184,33 +230,50 @@ async function syncOneDrive(client: Awaited<ReturnType<typeof graphClientForTena
   return failed;
 }
 
-async function syncTeams(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, users: BasicUser[]): Promise<number> {
+/**
+ * Syncs actual Teams (not per-user joined-team counts, which is what this used to do — see
+ * migrations/012_sync_job_resources.sql). "Sync a team" = enumerate its channels via the existing
+ * listChannels (already used by the separate Cleaning module's structure scan) and store the count;
+ * the selected team is the sync boundary, matching Outlook's mailbox-is-the-boundary and Cleanup's
+ * own per-resource granularity elsewhere in this app.
+ */
+async function syncTeams(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  connectionId: string,
+  syncJobId: string,
+  teams: TeamSummary[],
+  resourceRows: ResourceRowMap
+): Promise<number> {
   let failed = 0;
-  await runThrottled(users, (user) => getUserJoinedTeamsCount(client, user.id), {
+  await markProcessing(resourceRows);
+  await runThrottled(teams, (team) => listChannels(client, team.id), {
     isCancelled: () => isCancelled(syncJobId),
     label: "Teams",
-    onItemSettled: async (user, result) => {
+    onItemSettled: async (team, result) => {
       if (result.ok) {
         await upsertConnectionUser(connectionId, {
-          graphUserId: user.id,
-          upn: user.upn,
-          displayName: user.displayName,
+          graphUserId: team.id,
+          upn: team.displayName, // Teams has no natural secondary identifier — see connection_users' "columns mean different things per type" comment
+          displayName: team.displayName,
           storageUsedBytes: 0, // not meaningful for Teams — see docs/graph-api-limitations.md
-          itemCount: result.value,
+          itemCount: result.value.length,
           syncStatus: "synced",
           errorMessage: null,
         });
+        await settleResource(resourceRows, team.id, true, null);
       } else {
         failed++;
+        const errorMessage = String(result.error);
         await upsertConnectionUser(connectionId, {
-          graphUserId: user.id,
-          upn: user.upn,
-          displayName: user.displayName,
+          graphUserId: team.id,
+          upn: team.displayName,
+          displayName: team.displayName,
           storageUsedBytes: 0,
           itemCount: 0,
           syncStatus: "failed",
-          errorMessage: String(result.error),
+          errorMessage,
         });
+        await settleResource(resourceRows, team.id, false, errorMessage);
       }
       await query(`UPDATE sync_jobs SET processed_users = processed_users + 1 WHERE id = $1`, [syncJobId]);
     },
@@ -235,8 +298,20 @@ async function syncTeams(client: Awaited<ReturnType<typeof graphClientForTenant>
  * or corrupt Manage Clouds' math the way an earlier version of this function did (confirmed live:
  * it showed "0 out of 1,185 Mailboxes" instead of the real 395).
  */
-async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, users: BasicUser[]): Promise<number> {
+async function syncOutlook(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  connectionId: string,
+  syncJobId: string,
+  users: BasicUser[],
+  resourceRows: ResourceRowMap
+): Promise<number> {
   let failed = 0;
+  // The selected mailbox is the sync boundary (matching Teams' selected-team boundary) even though
+  // it internally runs three separate Graph passes (Mail, Calendar, Contacts) — so sync_job_resources
+  // is marked processing once up front, and settled once at the end below based on whether ANY of
+  // the three passes failed for that user, not once per pass.
+  const failedAny = new Map<string, string>(); // userId -> first error message seen for that user, across all three passes
+  await markProcessing(resourceRows);
 
   // connection_users is already pruned by the caller (shared with onedrive/teams) before syncOutlook runs.
   await runThrottled(users, (user) => getUserMailSummary(client, user.id), {
@@ -257,6 +332,7 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
         });
       } else {
         failed++;
+        const errorMessage = result.ok ? "No mailbox provisioned for this user" : String(result.error);
         await upsertConnectionUser(connectionId, {
           graphUserId: user.id,
           upn: user.upn,
@@ -264,8 +340,9 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
           storageUsedBytes: 0,
           itemCount: 0,
           syncStatus: "failed",
-          errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
+          errorMessage,
         });
+        if (!failedAny.has(user.id)) failedAny.set(user.id, errorMessage);
       }
       // Deliberately no processed_users increment here — see this function's doc comment.
     },
@@ -293,6 +370,7 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
         });
       } else {
         failed++;
+        const errorMessage = result.ok ? "No mailbox provisioned for this user" : String(result.error);
         await upsertOutlookCalendar(connectionId, {
           graphUserId: user.id,
           upn: user.upn,
@@ -300,8 +378,9 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
           storageUsedBytes: 0,
           itemCount: 0,
           syncStatus: "failed",
-          errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
+          errorMessage,
         });
+        if (!failedAny.has(user.id)) failedAny.set(user.id, errorMessage);
       }
       // Deliberately no processed_users increment here either — see this function's doc comment.
     },
@@ -328,6 +407,7 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
         });
       } else {
         failed++;
+        const errorMessage = result.ok ? "No mailbox provisioned for this user" : String(result.error);
         await upsertOutlookContact(connectionId, {
           graphUserId: user.id,
           upn: user.upn,
@@ -335,8 +415,9 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
           storageUsedBytes: 0,
           itemCount: 0,
           syncStatus: "failed",
-          errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
+          errorMessage,
         });
+        if (!failedAny.has(user.id)) failedAny.set(user.id, errorMessage);
       }
       // The one place this function increments the shared counter — see this function's doc
       // comment for why Mail/Calendar deliberately don't.
@@ -344,12 +425,25 @@ async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenan
     },
   });
 
+  // Settle each selected mailbox once, here, based on whether ANY of the three passes above failed
+  // for it — never once per pass, which would overwrite an earlier pass's outcome with a later one.
+  for (const user of users) {
+    await settleResource(resourceRows, user.id, !failedAny.has(user.id), failedAny.get(user.id) ?? null);
+  }
+
   return failed;
 }
 
 /** Each `connection_users` row is a SITE, not a person, for SharePoint — see docs/graph-api-limitations.md. */
-async function syncSharePoint(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, sites: SiteSummary[]): Promise<number> {
+async function syncSharePoint(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  connectionId: string,
+  syncJobId: string,
+  sites: SiteSummary[],
+  resourceRows: ResourceRowMap
+): Promise<number> {
   let failed = 0;
+  await markProcessing(resourceRows);
   await runThrottled(sites, (site) => getSiteDriveQuota(client, site.id), {
     isCancelled: () => isCancelled(syncJobId),
     label: "SharePoint",
@@ -368,8 +462,10 @@ async function syncSharePoint(client: Awaited<ReturnType<typeof graphClientForTe
           syncStatus: "synced",
           errorMessage: null,
         });
+        await settleResource(resourceRows, site.id, true, null);
       } else {
         failed++;
+        const errorMessage = result.ok ? "No document library provisioned for this site" : String(result.error);
         await upsertConnectionUser(connectionId, {
           graphUserId: site.id,
           upn: site.webUrl,
@@ -377,8 +473,9 @@ async function syncSharePoint(client: Awaited<ReturnType<typeof graphClientForTe
           storageUsedBytes: 0,
           itemCount: 0,
           syncStatus: "failed",
-          errorMessage: result.ok ? "No document library provisioned for this site" : String(result.error),
+          errorMessage,
         });
+        await settleResource(resourceRows, site.id, false, errorMessage);
       }
       await query(`UPDATE sync_jobs SET processed_users = processed_users + 1 WHERE id = $1`, [syncJobId]);
     },
@@ -414,30 +511,62 @@ export const cloudSyncWorker = new Worker(
     await query(`UPDATE sync_jobs SET status = 'running', started_at = now(), processed_users = 0 WHERE id = $1`, [syncJobId]);
     await logConnectionEvent("job_started", info.connection_id, info.tenant_id, { syncJobId, cloudType: info.cloud_type });
 
+    // A resource-scoped run (POST /:id/resync with resourceIds) has already-validated rows here,
+    // seeded by the route — an empty result means either no selection was made (today's plain
+    // "Resync" icon) or this sync_jobs row predates this feature entirely; both cases run the exact
+    // tenant-wide path below, unchanged, which is also what keeps routes/cleaning.ts's "Sync Now"
+    // and the initial connect flow (neither ever populates sync_job_resources) working as before.
+    const selectedResources = await query<{
+      id: string;
+      graph_resource_id: string;
+      display_name: string;
+      secondary: string | null;
+    }>(`SELECT id, graph_resource_id, display_name, secondary FROM sync_job_resources WHERE sync_job_id = $1`, [syncJobId]);
+    const isScoped = selectedResources.rows.length > 0;
+
     try {
       const client = await graphClientForTenant(info.m365_tenant_id);
       let failed = 0;
 
-      if (info.cloud_type === "sharepoint") {
+      if (isScoped) {
+        // Never re-enumerates the tenant — the selected resources' identifying fields were already
+        // validated and snapshotted by the route at selection time, so this just reshapes them into
+        // the same BasicUser/SiteSummary/TeamSummary the sync* functions already expect. No prune*
+        // call here either: pruning means "remove anything not in this full listing," which is only
+        // meaningful for a run that actually touched the full tenant.
+        const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+        await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+
+        if (info.cloud_type === "sharepoint") {
+          const sites: SiteSummary[] = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, displayName: r.display_name, webUrl: r.secondary ?? "" }));
+          failed = await syncSharePoint(client, info.connection_id, syncJobId, sites, resourceRows);
+        } else if (info.cloud_type === "teams") {
+          const teams: TeamSummary[] = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, displayName: r.display_name }));
+          failed = await syncTeams(client, info.connection_id, syncJobId, teams, resourceRows);
+        } else {
+          const users: BasicUser[] = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, upn: r.secondary ?? "", displayName: r.display_name }));
+          failed = info.cloud_type === "onedrive" ? await syncOneDrive(client, info.connection_id, syncJobId, users, resourceRows) : await syncOutlook(client, info.connection_id, syncJobId, users, resourceRows);
+        }
+      } else if (info.cloud_type === "sharepoint") {
         const sites = await searchSites(client);
         await pruneStaleConnectionUsers(info.connection_id, sites.map((s) => s.id));
         await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, sites.length]);
-        failed = await syncSharePoint(client, info.connection_id, syncJobId, sites);
+        failed = await syncSharePoint(client, info.connection_id, syncJobId, sites, null);
+      } else if (info.cloud_type === "teams") {
+        const teams = await listAllTeams(client);
+        await pruneStaleConnectionUsers(info.connection_id, teams.map((t) => t.id));
+        await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, teams.length]);
+        failed = await syncTeams(client, info.connection_id, syncJobId, teams, null);
       } else {
         const users = await listAllUsers(client);
         await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
         await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
-        if (info.cloud_type === "onedrive") {
-          failed = await syncOneDrive(client, info.connection_id, syncJobId, users);
-        } else if (info.cloud_type === "outlook") {
-          failed = await syncOutlook(client, info.connection_id, syncJobId, users);
-        } else {
-          failed = await syncTeams(client, info.connection_id, syncJobId, users);
-        }
+        failed = info.cloud_type === "onedrive" ? await syncOneDrive(client, info.connection_id, syncJobId, users, null) : await syncOutlook(client, info.connection_id, syncJobId, users, null);
       }
 
       const cancelled = await isCancelled(syncJobId);
       const finalStatus = cancelled ? "cancelled" : failed > 0 ? "completed_with_errors" : "completed";
+      if (cancelled) await cancelRemainingResources(syncJobId);
 
       await query(`UPDATE sync_jobs SET status = $2, finished_at = now() WHERE id = $1`, [syncJobId, finalStatus]);
       if (!cancelled) {
@@ -466,6 +595,14 @@ export const cloudSyncWorker = new Worker(
       await query(
         `UPDATE sync_jobs SET status = 'failed', finished_at = now(), error_log = error_log || $2::jsonb WHERE id = $1`,
         [syncJobId, JSON.stringify([{ message: String(err), at: new Date().toISOString() }])]
+      );
+      // Whatever resources hadn't settled yet when the whole job crashed (auth failure, unexpected
+      // exception) must not be left at 'pending'/'processing' forever — distinct from cancellation,
+      // this reflects the job dying out from under them, not an operator-requested stop.
+      await query(
+        `UPDATE sync_job_resources SET status = 'failed', error_message = COALESCE(error_message, $2), completed_at = now(), updated_at = now()
+         WHERE sync_job_id = $1 AND status IN ('pending', 'processing')`,
+        [syncJobId, String(err)]
       );
       throw err;
     }

@@ -1,5 +1,18 @@
 import { useEffect, useState } from "react";
-import { exportConnectionUsersUrl, listConnectionUsers, type ConnectionUserRow, type ManageCloudsRow } from "../../api/clouds";
+import {
+  exportConnectionUsersUrl,
+  getSyncJobResources,
+  listAvailableResources,
+  listConnectionUsers,
+  resyncCloudConnection,
+  type AvailableResourceRow,
+  type ConnectionUserRow,
+  type ManageCloudsRow,
+  type SyncJobResourceRow,
+} from "../../api/clouds";
+import { ApiClientError } from "../../api/client";
+import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../cleaning/DiscoveryTable";
+import { Spinner } from "../cleaning/ItemFilesDrilldown";
 import { OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 import type { Workload } from "../../types";
 import { formatBytes } from "../../utils/format";
@@ -22,12 +35,23 @@ const CLOUD_LABELS: Record<Workload, string> = {
 
 // SharePoint enumerates sites, not people — a tenant with a hundred users can easily have a
 // thousand+ sites (one per team/group, communication sites, hub sites, etc.), so labeling that
-// count "Users" the same way OneDrive/Teams do is misleading, not just cosmetically wrong.
+// count "Users" the same way OneDrive does is misleading, not just cosmetically wrong. Teams synced
+// to mean actual Teams (not per-user joined-team counts — see migrations/012_sync_job_resources.sql)
+// for the same reason: "Users" would now be wrong there too.
 const UNIT_LABELS: Record<Workload, { singular: string; plural: string }> = {
   onedrive: { singular: "User", plural: "Users" },
-  teams: { singular: "User", plural: "Users" },
+  teams: { singular: "Team", plural: "Teams" },
   sharepoint: { singular: "Site", plural: "Sites" },
   outlook: { singular: "Mailbox", plural: "Mailboxes" },
+};
+
+// The secondary identifier shown alongside a resource's name in the Sync Resources picker — null
+// where the workload has nothing meaningful to show there (a Team has no email/URL equivalent).
+const SECONDARY_COLUMN_LABEL: Record<Workload, string | null> = {
+  onedrive: "Email",
+  outlook: "Email",
+  sharepoint: "URL",
+  teams: null,
 };
 
 const STATUS_BADGE: Partial<Record<ManageCloudsRow["status"], { label: string; style: string }>> = {
@@ -156,7 +180,7 @@ function ManageCloudsRowView({
         </div>
       </div>
 
-      {expanded && <ExpandedSummary row={row} />}
+      {expanded && <ExpandedPanel row={row} />}
 
       {confirmingDisconnect && (
         <DisconnectConfirmModal
@@ -203,6 +227,38 @@ function DisconnectConfirmModal({ row, onCancel, onConfirm }: { row: ManageCloud
 }
 
 /**
+ * Two tabs behind the expand chevron: "Synced Resources" (the existing read-only, already-synced
+ * view — unchanged) and "Sync Resources" (new — browse every resource the workload currently has,
+ * select a subset, sync only those). Reuses the same expand/collapse mechanism already in place
+ * rather than introducing a new page or route for the new flow.
+ */
+function ExpandedPanel({ row }: { row: ManageCloudsRow }) {
+  const [tab, setTab] = useState<"synced" | "sync">("synced");
+  return (
+    <div className="border-t border-slate-100 bg-slate-50">
+      <div className="flex gap-1 px-6 pt-3">
+        <ExpandedTabButton label="Synced Resources" active={tab === "synced"} onClick={() => setTab("synced")} />
+        <ExpandedTabButton label="Sync Resources" active={tab === "sync"} onClick={() => setTab("sync")} />
+      </div>
+      {tab === "synced" ? <ExpandedSummary row={row} /> : <SyncResourcePicker connectionId={row.id} cloudType={row.cloudType} />}
+    </div>
+  );
+}
+
+function ExpandedTabButton({ label, active, onClick }: { label: string; active: boolean; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`rounded-t-md px-3 py-1.5 text-sm font-medium transition-colors ${
+        active ? "bg-white text-[#1b2fc4]" : "text-slate-500 hover:text-slate-700"
+      }`}
+    >
+      {label}
+    </button>
+  );
+}
+
+/**
  * Total/Active/In-Active tiles + the full per-user table (not gated behind a "show failed" click —
  * every row, every status, always visible once expanded) + a CSV export of the whole list. "Active"
  * here means this app's own last sync actually found and read real data for that user
@@ -241,7 +297,7 @@ function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
   }, [row.id, cursorStack, pageIndex]);
 
   return (
-    <div className="border-t border-slate-100 bg-slate-50 px-6 py-4">
+    <div className="px-6 py-4">
       <div className="grid grid-cols-3 gap-4">
         <StatTile label={`Total ${unit.plural}`} value={row.totalUsers} />
         <StatTile label={`Active ${unit.plural}`} value={row.addedUsers} />
@@ -330,6 +386,210 @@ function ExpandedSummary({ row }: { row: ManageCloudsRow }) {
         </p>
       )}
       {row.lastSyncedAt && <p className="mt-3 text-xs text-slate-400">Last synced {formatDate(row.lastSyncedAt)}</p>}
+    </div>
+  );
+}
+
+const RESOURCE_PAGE_SIZE = 20;
+
+/**
+ * The new resource-level sync flow: browse every resource this workload currently has (live, via
+ * GET /:id/available-resources — not connection_users, which can be empty/stale pre-sync), select a
+ * subset, "Sync Selected". Reuses DiscoveryTable exactly as the Cleaning module's own discovery
+ * tables do (search, select-all, per-row checkbox, page-number pagination) — "Select All" here only
+ * ever toggles the currently-fetched page's rows, the same as every other DiscoveryTable caller,
+ * never a separate "select every resource in the tenant" action.
+ */
+function SyncResourcePicker({ connectionId, cloudType }: { connectionId: string; cloudType: Workload }) {
+  const [page, setPage] = useState(1);
+  const [searchInput, setSearchInput] = useState("");
+  const search = useDebouncedValue(searchInput, 400);
+  const [rows, setRows] = useState<AvailableResourceRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [starting, setStarting] = useState(false);
+  const [startError, setStartError] = useState<string | null>(null);
+  const [activeJobId, setActiveJobId] = useState<string | null>(null);
+
+  // A search change always starts back at page 1 — a stale page number from a differently-filtered
+  // list wouldn't make sense against the new one (same pattern as ReportsPage/CategoryItemsList).
+  useEffect(() => {
+    setPage(1);
+  }, [search]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setLoading(true);
+    listAvailableResources(connectionId, { search, page, pageSize: RESOURCE_PAGE_SIZE })
+      .then((res) => {
+        if (cancelled) return;
+        setRows(res.resources);
+        setTotal(res.total);
+        setError(null);
+      })
+      .catch((err) => {
+        if (!cancelled) setError(err instanceof ApiClientError ? err.message : "Couldn't load resources.");
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [connectionId, search, page]);
+
+  function toggle(id: string) {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
+      return next;
+    });
+  }
+
+  function toggleAll() {
+    setSelected((prev) => {
+      const next = new Set(prev);
+      const allSelected = rows.length > 0 && rows.every((r) => next.has(r.id));
+      for (const r of rows) {
+        if (allSelected) next.delete(r.id);
+        else next.add(r.id);
+      }
+      return next;
+    });
+  }
+
+  async function handleSyncSelected() {
+    setStarting(true);
+    setStartError(null);
+    try {
+      const result = await resyncCloudConnection(connectionId, [...selected]);
+      setActiveJobId(result.jobId);
+      setSelected(new Set());
+      if (result.skipped.length > 0) {
+        setStartError(`${result.skipped.length} selected ${result.skipped.length === 1 ? "resource" : "resources"} couldn't be synced (already syncing, or no longer found).`);
+      }
+    } catch (err) {
+      setStartError(err instanceof ApiClientError ? err.message : "Couldn't start sync.");
+    } finally {
+      setStarting(false);
+    }
+  }
+
+  const unit = UNIT_LABELS[cloudType];
+  const secondaryLabel = SECONDARY_COLUMN_LABEL[cloudType];
+  const totalPages = Math.max(1, Math.ceil(total / RESOURCE_PAGE_SIZE));
+
+  const columns: DiscoveryColumn<AvailableResourceRow>[] = [
+    { label: `${unit.singular} Name`, render: (r) => r.displayName },
+    ...(secondaryLabel ? [{ label: secondaryLabel, render: (r: AvailableResourceRow) => r.secondary ?? "—" }] : []),
+  ];
+
+  return (
+    <div className="px-6 py-4">
+      {activeJobId && <SyncJobProgress connectionId={connectionId} jobId={activeJobId} onDone={() => setActiveJobId(null)} />}
+
+      <DiscoveryTable<AvailableResourceRow>
+        title={`Select ${unit.plural.toLowerCase()} to sync`}
+        columns={columns}
+        rows={rows}
+        loading={loading}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={setPage}
+        search={searchInput}
+        onSearchChange={setSearchInput}
+        searchPlaceholder={`Search ${unit.plural.toLowerCase()}…`}
+        selected={selected}
+        onToggle={toggle}
+        onToggleAll={toggleAll}
+        emptyMessage={`No ${unit.plural.toLowerCase()} found.`}
+      />
+
+      <div className="mt-3 flex items-center justify-between">
+        <span className="text-sm font-medium text-slate-600">Selected: {selected.size}</span>
+        <button
+          onClick={handleSyncSelected}
+          disabled={selected.size === 0 || starting}
+          className="rounded-md bg-[#1b2fc4] px-4 py-2 text-sm font-semibold text-white hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          {starting ? "Starting…" : "Sync Selected"}
+        </button>
+      </div>
+      {startError && <p className="mt-2 text-sm text-rose-600">{startError}</p>}
+    </div>
+  );
+}
+
+const RESOURCE_STATUS_STYLE: Record<SyncJobResourceRow["status"], { label: string; className: string }> = {
+  pending: { label: "Pending", className: "text-slate-400" },
+  processing: { label: "Processing", className: "text-blue-600" },
+  completed: { label: "Completed", className: "text-emerald-600" },
+  failed: { label: "Failed", className: "text-rose-600" },
+  cancelled: { label: "Cancelled", className: "text-slate-500" },
+};
+
+const TERMINAL_RESOURCE_STATUSES = new Set<SyncJobResourceRow["status"]>(["completed", "failed", "cancelled"]);
+
+/**
+ * Live per-resource progress for the run just started — not just one aggregate bar, since the whole
+ * point of resource-level sync is that "65% done" means nothing once the operator picked exactly
+ * which resources they care about. Polls every 3s (same cadence established elsewhere this session
+ * for live progress) until every resource has settled one way or another.
+ */
+function SyncJobProgress({ connectionId, jobId, onDone }: { connectionId: string; jobId: string; onDone: () => void }) {
+  const [resources, setResources] = useState<SyncJobResourceRow[] | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    async function poll() {
+      const data = await getSyncJobResources(connectionId, jobId).catch(() => null);
+      if (cancelled || !data) return;
+      setResources(data.resources);
+      const allDone = data.resources.length > 0 && data.resources.every((r) => TERMINAL_RESOURCE_STATUSES.has(r.status));
+      if (!allDone) timer = setTimeout(poll, 3000);
+    }
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [connectionId, jobId]);
+
+  if (!resources) return <p className="mb-4 text-sm text-slate-500">Starting sync…</p>;
+
+  const completedCount = resources.filter((r) => TERMINAL_RESOURCE_STATUSES.has(r.status)).length;
+  const allDone = resources.length > 0 && completedCount === resources.length;
+
+  return (
+    <div className="mb-4 overflow-hidden rounded-lg border border-slate-200 bg-white">
+      <div className="flex items-center justify-between border-b border-slate-100 px-4 py-2.5 text-sm">
+        <span className="flex items-center gap-1.5 font-medium text-slate-700">
+          {!allDone && <Spinner className="h-3.5 w-3.5" />}
+          {completedCount} of {resources.length} completed
+        </span>
+        {allDone && (
+          <button onClick={onDone} className="font-medium text-[#1b2fc4] hover:underline">
+            Dismiss
+          </button>
+        )}
+      </div>
+      <ul className="max-h-56 divide-y divide-slate-100 overflow-y-auto text-sm">
+        {resources.map((r) => (
+          <li key={r.id} className="flex items-center justify-between px-4 py-2">
+            <span className="text-slate-700">{r.displayName}</span>
+            <span className={`flex items-center gap-1.5 text-xs font-medium ${RESOURCE_STATUS_STYLE[r.status].className}`}>
+              {(r.status === "pending" || r.status === "processing") && <Spinner className="h-3 w-3" />}
+              {RESOURCE_STATUS_STYLE[r.status].label}
+            </span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
