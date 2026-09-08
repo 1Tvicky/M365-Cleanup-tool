@@ -96,6 +96,7 @@ function ManageCloudsRowView({
   const badge = STATUS_BADGE[row.status];
   const hasJob = row.totalUsers > 0;
   const unit = UNIT_LABELS[row.cloudType];
+  const [confirmingDisconnect, setConfirmingDisconnect] = useState(false);
 
   return (
     <div>
@@ -137,7 +138,7 @@ function ManageCloudsRowView({
 
         <div className="ml-auto flex items-center gap-4">
           <span className="text-sm font-medium text-slate-600">Multiuser</span>
-          <button onClick={onDisconnect} aria-label="Disconnect" className="text-slate-400 hover:text-rose-600">
+          <button onClick={() => setConfirmingDisconnect(true)} aria-label="Disconnect" className="text-slate-400 hover:text-rose-600">
             <TrashIcon className="h-[18px] w-[18px]" />
           </button>
           <button
@@ -153,6 +154,47 @@ function ManageCloudsRowView({
       </div>
 
       {expanded && <ExpandedSummary row={row} />}
+
+      {confirmingDisconnect && (
+        <DisconnectConfirmModal
+          row={row}
+          onCancel={() => setConfirmingDisconnect(false)}
+          onConfirm={() => {
+            setConfirmingDisconnect(false);
+            onDisconnect();
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/**
+ * Disconnecting was previously one click on the trash icon with no way back — easy to trigger by
+ * accident while trying to verify something else in the row (e.g. the resync icon sits right next
+ * to it). Requires an explicit confirm now; Cancel (or clicking the backdrop) leaves the connection
+ * untouched.
+ */
+function DisconnectConfirmModal({ row, onCancel, onConfirm }: { row: ManageCloudsRow; onCancel: () => void; onConfirm: () => void }) {
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/40 px-4" onClick={onCancel}>
+      <div className="w-full max-w-sm rounded-xl bg-white p-6 shadow-xl" onClick={(e) => e.stopPropagation()}>
+        <h3 className="text-base font-semibold text-slate-900">Disconnect {CLOUD_LABELS[row.cloudType]}?</h3>
+        <p className="mt-2 text-sm text-slate-500">
+          This removes the <span className="font-medium text-slate-700">{row.tenantDomain}</span> {CLOUD_LABELS[row.cloudType]}{" "}
+          connection from CloudFuze — discovery and cleanup for it won't be available here until it's reconnected. This doesn't
+          revoke Microsoft's own consent grant; do that from the tenant's Enterprise Applications page if you want to fully
+          remove access.
+        </p>
+        <div className="mt-5 flex justify-end gap-3">
+          <button onClick={onCancel} className="rounded-md border border-slate-200 px-4 py-2 text-sm font-semibold text-slate-600 hover:bg-slate-50">
+            Cancel
+          </button>
+          <button onClick={onConfirm} className="rounded-md bg-rose-600 px-4 py-2 text-sm font-semibold text-white hover:bg-rose-700">
+            Disconnect
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
