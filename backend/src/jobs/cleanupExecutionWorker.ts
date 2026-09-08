@@ -295,6 +295,16 @@ export const cleanupExecutionWorker = new Worker(
       await runThrottled(pending.rows, (item) => executeAnyItem(client, item, operationId), {
         isCancelled: () => isCancelled(operationId),
         batchSize: 3, // conservative — each item itself fans out into its own (throttled) per-file deletes; tune after the first live test run
+        // executeAnyItem is a whole list-everything/seed-DB/delete-everything pipeline per item, not
+        // one atomic Graph call — a mailbox with a few thousand messages finishes in seconds, but
+        // one with millions of messages (observed: a real mailbox with 3.3M items) can never finish
+        // inside the default 30s call timeout no matter how healthy Graph is, so every such item was
+        // guaranteed to fail with a false "Graph call exceeded 30000ms". Every actual Graph call
+        // inside executeAnyItem already gets its own correctly-scoped timeout via its own nested
+        // runThrottled call (e.g. deleteMessage/deleteCalendarEvent/deleteContact below) — this
+        // outer layer doesn't need one too, and imposing one here only forces large resources to
+        // fail outright instead of just taking proportionally longer.
+        callTimeoutMs: null,
         onItemSettled: async (item, result) => {
           if (result.ok) {
             successful++;

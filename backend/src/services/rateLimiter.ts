@@ -26,9 +26,22 @@ export async function runThrottled<T, R>(
     batchSize?: number;
     /** Tags the throttle/backoff console warnings below with which workload made the call (e.g. "OneDrive", "Outlook-Mail") — see the isolation assessment's logging requirement. Defaults to the generic "graph" for call sites that don't pass one. */
     label?: string;
+    /**
+     * Overrides config.graph.callTimeoutMs for this call site; pass `null` to skip the per-item
+     * timeout entirely. The default 30s deadline assumes `execute(item)` is (or tightly wraps) a
+     * single atomic Graph call — it's the wrong tool when `execute(item)` is itself a whole
+     * multi-step pipeline (list-everything, seed DB rows, delete-everything) with no fixed upper
+     * bound on how long that legitimately takes, e.g. cleanupExecutionWorker.ts's per-item loop:
+     * a mailbox with a few thousand messages finishes in seconds, but one with millions of
+     * messages cannot possibly finish inside 30s no matter how healthy Graph is — every atomic
+     * Graph call inside that pipeline already gets its own correctly-scoped timeout via its own
+     * nested runThrottled call, so this outer layer doesn't need (and must not impose) one too.
+     */
+    callTimeoutMs?: number | null;
   } = {}
 ): Promise<void> {
-  const { maxRetries, baseBackoffMs, maxBackoffMs, callTimeoutMs } = config.graph;
+  const { maxRetries, baseBackoffMs, maxBackoffMs } = config.graph;
+  const callTimeoutMs = opts.callTimeoutMs === undefined ? config.graph.callTimeoutMs : opts.callTimeoutMs;
   const batchSize = opts.batchSize ?? config.graph.batchSize;
   const label = opts.label ?? "graph";
 
@@ -82,7 +95,8 @@ class GraphCallTimeoutError extends Error {}
  * entire job — permanently. Racing a timeout here guarantees every item eventually settles one way
  * or another, feeding back into the same retry/backoff path as any other transient failure.
  */
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+function withTimeout<T>(promise: Promise<T>, ms: number | null): Promise<T> {
+  if (ms === null) return promise;
   return new Promise((resolve, reject) => {
     const timer = setTimeout(() => reject(new GraphCallTimeoutError(`Graph call exceeded ${ms}ms`)), ms);
     promise.then(
