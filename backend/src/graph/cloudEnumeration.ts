@@ -65,6 +65,36 @@ export async function getUserDriveQuota(client: Client, userId: string): Promise
   }
 }
 
+export interface MailSummary {
+  itemCount: number;
+}
+
+/**
+ * Unlike OneDrive/SharePoint, Graph has no single-call mailbox byte-size quota under application
+ * permissions (no equivalent of drive.quota.used) — Reports.Read.All's mailbox usage report is the
+ * closest thing, but it's a daily-refreshed batch export, not a live per-user call, and out of step
+ * with every other cheap-per-user-call in this file. So, same trade-off already made for Teams
+ * (storageUsedBytes: 0, "not meaningful") — mailbox size isn't tracked at this summary level; item
+ * count (top-level mail folders' totalItemCount, summed) is. Real per-message byte sizes ARE
+ * tracked during actual cleanup execution (message.size), which is where "data cleared" is reported.
+ */
+export async function getUserMailSummary(client: Client, userId: string): Promise<MailSummary | null> {
+  try {
+    let itemCount = 0;
+    let url: string | undefined = `/users/${userId}/mailFolders?$select=totalItemCount&$top=100`;
+    while (url) {
+      const res: any = await client.api(url).get();
+      for (const folder of res.value as any[]) itemCount += folder.totalItemCount ?? 0;
+      url = res["@odata.nextLink"];
+    }
+    return { itemCount };
+  } catch (err) {
+    // No mailbox provisioned for this user (e.g. a licenseless or resource account) — not a sync failure.
+    if ((err as { statusCode?: number })?.statusCode === 404) return null;
+    throw err;
+  }
+}
+
 export interface SiteSummary {
   id: string;
   webUrl: string;

@@ -1,11 +1,12 @@
 import type { CloudConnector, Preview, Tenant } from "../types";
 
-// Phase 1 (M365 only) — mirrors CloudFuze's "Business Clouds" tile grid, scoped to the three
+// Phase 1 (M365 only) — mirrors CloudFuze's "Business Clouds" tile grid, scoped to the four
 // workloads this tool cleans up. Broader clouds (Google, Box, Slack, etc.) are out of scope here.
 export const CONNECTORS: CloudConnector[] = [
   { id: "onedrive", label: "OneDrive for business" },
   { id: "sharepoint", label: "SharePoint online" },
   { id: "teams", label: "Microsoft Teams" },
+  { id: "outlook", label: "Outlook" },
 ];
 
 export const MOCK_TENANTS: Tenant[] = [

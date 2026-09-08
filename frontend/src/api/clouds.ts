@@ -1,6 +1,6 @@
 import { rawFetch } from "./client";
 
-export type CloudType = "onedrive" | "sharepoint" | "teams";
+export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook";
 export type ConnectionStatus = "connecting" | "active" | "error" | "needs_reauth" | "disconnected";
 
 export interface ManageCloudsRow {

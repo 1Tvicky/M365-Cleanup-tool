@@ -63,8 +63,8 @@ export interface CleaningTeamsSummary {
   countScan: CleaningScanRow | null;
 }
 
-/** Cleanup (deletion) execution phase — see docs/cleanup-execution plan. Only onedrive_account/sharepoint_site are ever actually executed against Graph; channel/chat always resolve to 'unsupported' (Microsoft Graph has no application-permission path to delete Teams channel/chat messages — delegated-only). */
-export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "channel" | "chat";
+/** Cleanup (deletion) execution phase — see docs/cleanup-execution plan. onedrive_account/sharepoint_site/outlook_mailbox are actually executed against Graph; channel/chat always resolve to 'unsupported' (Microsoft Graph has no application-permission path to delete Teams channel/chat messages — delegated-only). For outlook_mailbox, "delete" means delete every message in every folder — distinguished folders (Inbox, Sent Items, etc.) can't be deleted themselves, only emptied. */
+export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "channel" | "chat";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 
@@ -72,18 +72,19 @@ export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed
 export interface CleanupManifest {
   oneDrive?: { connectionId: string; ids: string[] };
   sharePoint?: { connectionId: string; ids: string[] };
+  outlook?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
   valid: boolean;
-  summary: { oneDriveAccounts: number; sharePointSites: number; channels: number; chats: number };
+  summary: { oneDriveAccounts: number; sharePointSites: number; outlookMailboxes: number; channels: number; chats: number };
   /** Selected items that can never be executed under this app's Graph permissions — reported here, not in errors, since selecting them isn't invalid, just not actionable yet. */
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
   /** Ids (from the submitted manifest) that resolved successfully, grouped by slot — lets the frontend reconcile a selection against the latest sync (drop ids no longer found) without a separate endpoint. */
-  foundIds: { oneDrive: string[]; sharePoint: string[]; channels: string[]; chats: string[] };
+  foundIds: { oneDrive: string[]; sharePoint: string[]; outlook: string[]; channels: string[]; chats: string[] };
 }
 
 export interface CleanupOperationRow {
@@ -155,6 +156,7 @@ export interface CleaningSyncOperation {
     // access block — "completed_with_errors" almost always means this, not that sync itself broke.
     onedrive?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
     sharepoint?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
+    outlook?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
     teams?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
   };
 }

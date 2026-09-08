@@ -315,6 +315,7 @@ const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
   onedrive: "OneDrive for Business",
   sharepoint: "SharePoint Online",
   teams: "Microsoft Teams",
+  outlook: "Outlook",
 };
 
 /**

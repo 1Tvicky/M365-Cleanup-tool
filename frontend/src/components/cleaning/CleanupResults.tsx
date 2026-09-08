@@ -16,6 +16,7 @@ import { formatBytes, formatDate } from "../../utils/format";
 const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
   sharepoint_site: "SharePoint site",
+  outlook_mailbox: "Outlook mailbox",
   channel: "Teams channel",
   chat: "Direct message",
 };

@@ -25,6 +25,7 @@ function ProgressBar({ completed, failed, total }: { completed: number; failed: 
 const CATEGORY_LABEL: Record<string, string> = {
   onedrive_account: "OneDrive",
   sharepoint_site: "SharePoint",
+  outlook_mailbox: "Outlook",
   channel: "Teams Channels",
   chat: "Direct Messages",
 };

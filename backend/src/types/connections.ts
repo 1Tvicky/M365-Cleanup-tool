@@ -1,9 +1,9 @@
-export type CloudType = "onedrive" | "sharepoint" | "teams";
+export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook";
 export type ConnectionStatus = "connecting" | "active" | "error" | "needs_reauth" | "disconnected";
 export type SyncJobStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type ConnectionUserSyncStatus = "pending" | "synced" | "failed";
 
-export const CLOUD_TYPES: readonly CloudType[] = ["onedrive", "sharepoint", "teams"];
+export const CLOUD_TYPES: readonly CloudType[] = ["onedrive", "sharepoint", "teams", "outlook"];
 
 export function isCloudType(value: string): value is CloudType {
   return (CLOUD_TYPES as readonly string[]).includes(value);

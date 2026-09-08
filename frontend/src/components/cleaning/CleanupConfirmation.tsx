@@ -7,12 +7,14 @@ function selectedCloudNames(summary: CleanupValidationResult["summary"]): string
   const names: string[] = [];
   if (summary.oneDriveAccounts > 0) names.push("OneDrive");
   if (summary.sharePointSites > 0) names.push("SharePoint");
+  if (summary.outlookMailboxes > 0) names.push("Outlook");
   return names.length > 0 ? names.join(" and ") : "Microsoft 365";
 }
 
 const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
   sharepoint_site: "SharePoint site",
+  outlook_mailbox: "Outlook mailbox",
   channel: "Teams channel",
   chat: "Direct message conversation",
 };
@@ -57,7 +59,7 @@ export function CleanupConfirmation({
     }
   }
 
-  const executableCount = result ? result.summary.oneDriveAccounts + result.summary.sharePointSites : 0;
+  const executableCount = result ? result.summary.oneDriveAccounts + result.summary.sharePointSites + result.summary.outlookMailboxes : 0;
 
   return (
     <div className="mx-auto max-w-2xl px-8 py-10">
@@ -90,6 +92,12 @@ export function CleanupConfirmation({
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <span className="text-sm font-medium text-slate-700">SharePoint Sites</span>
                 <span className="text-sm text-slate-600">{result.summary.sharePointSites.toLocaleString()}</span>
+              </div>
+            )}
+            {result.summary.outlookMailboxes > 0 && (
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-medium text-slate-700">Outlook Mailboxes</span>
+                <span className="text-sm text-slate-600">{result.summary.outlookMailboxes.toLocaleString()}</span>
               </div>
             )}
             {executableCount === 0 && (

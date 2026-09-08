@@ -203,6 +203,17 @@ cleaningRouter.get(
   })
 );
 
+/** GET /api/cleaning/connections/:id/outlook — Outlook Mailboxes table. */
+cleaningRouter.get(
+  "/connections/:id/outlook",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    await resolveConnection(req.params.id!, "outlook");
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
+    res.json({ mailboxes: rows, total, page, pageSize });
+  })
+);
+
 async function latestScan(connectionId: string, scanType: "teams_structure" | "message_counts"): Promise<CleaningScanRow | null> {
   const result = await query<{
     id: string; scan_type: "teams_structure" | "message_counts"; status: string;
@@ -421,6 +432,7 @@ const manifestSlotSchema = z.object({ connectionId: z.string().uuid(), ids: z.ar
 const cleanupManifestSchema = z.object({
   oneDrive: manifestSlotSchema.optional(),
   sharePoint: manifestSlotSchema.optional(),
+  outlook: manifestSlotSchema.optional(),
   channels: manifestSlotSchema.optional(),
   chats: manifestSlotSchema.optional(),
 });
@@ -440,9 +452,13 @@ async function requireCleanupAdmin(tenantId: string, operatorId: string): Promis
 async function resolveManifestTenant(manifest: CleanupManifest, operatorId: string): Promise<string> {
   const connectionIds = [
     ...new Set(
-      [manifest.oneDrive?.connectionId, manifest.sharePoint?.connectionId, manifest.channels?.connectionId, manifest.chats?.connectionId].filter(
-        (id): id is string => Boolean(id)
-      )
+      [
+        manifest.oneDrive?.connectionId,
+        manifest.sharePoint?.connectionId,
+        manifest.outlook?.connectionId,
+        manifest.channels?.connectionId,
+        manifest.chats?.connectionId,
+      ].filter((id): id is string => Boolean(id))
     ),
   ];
   if (connectionIds.length === 0) {
@@ -482,7 +498,7 @@ async function resolveManifestItems(
 ): Promise<{ items: ResolvedManifestItem[]; errors: string[]; foundIds: CleanupValidationResult["foundIds"] }> {
   const items: ResolvedManifestItem[] = [];
   const errors: string[] = [];
-  const foundIds: CleanupValidationResult["foundIds"] = { oneDrive: [], sharePoint: [], channels: [], chats: [] };
+  const foundIds: CleanupValidationResult["foundIds"] = { oneDrive: [], sharePoint: [], outlook: [], channels: [], chats: [] };
 
   if (manifest.oneDrive) {
     await resolveConnection(manifest.oneDrive.connectionId, "onedrive");
@@ -532,6 +548,31 @@ async function resolveManifestItems(
         supported: true,
       });
       foundIds.sharePoint.push(row.id);
+    }
+  }
+
+  if (manifest.outlook) {
+    await resolveConnection(manifest.outlook.connectionId, "outlook");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
+      `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.outlook.connectionId, manifest.outlook.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.outlook.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Outlook mailbox is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.outlook.connectionId,
+        resourceType: "outlook_mailbox",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        graphRef: { userId: row.graph_user_id },
+        supported: true,
+      });
+      foundIds.outlook.push(row.id);
     }
   }
 
@@ -595,6 +636,7 @@ function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult[
   return {
     oneDriveAccounts: items.filter((i) => i.resourceType === "onedrive_account").length,
     sharePointSites: items.filter((i) => i.resourceType === "sharepoint_site").length,
+    outlookMailboxes: items.filter((i) => i.resourceType === "outlook_mailbox").length,
     channels: items.filter((i) => i.resourceType === "channel").length,
     chats: items.filter((i) => i.resourceType === "chat").length,
   };
@@ -662,9 +704,10 @@ async function hasActiveTenantSync(db: Queryable, tenantId: string): Promise<boo
     `SELECT 1 FROM cleaning_sync_operations so
      LEFT JOIN sync_jobs sj1 ON sj1.id = so.onedrive_sync_job_id
      LEFT JOIN sync_jobs sj2 ON sj2.id = so.sharepoint_sync_job_id
+     LEFT JOIN sync_jobs sj3 ON sj3.id = so.outlook_sync_job_id
      LEFT JOIN cleaning_scans cs ON cs.id = so.teams_scan_id
      WHERE so.tenant_id = $1
-       AND (sj1.status IN ('queued', 'running') OR sj2.status IN ('queued', 'running') OR cs.status IN ('queued', 'running'))
+       AND (sj1.status IN ('queued', 'running') OR sj2.status IN ('queued', 'running') OR sj3.status IN ('queued', 'running') OR cs.status IN ('queued', 'running'))
      LIMIT 1`,
     [tenantId]
   );
@@ -817,11 +860,12 @@ function toCleanupOperationRow(r: CleanupOperationSqlRow): CleanupOperationRow {
   };
 }
 
-const RESOURCE_TYPES: CleanupResourceType[] = ["onedrive_account", "sharepoint_site", "channel", "chat"];
+const RESOURCE_TYPES: CleanupResourceType[] = ["onedrive_account", "sharepoint_site", "outlook_mailbox", "channel", "chat"];
 
 const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   onedrive_account: "OneDrive account",
   sharepoint_site: "SharePoint site",
+  outlook_mailbox: "Outlook mailbox",
   channel: "Teams channel",
   chat: "Direct message",
 };
@@ -1175,7 +1219,7 @@ cleaningRouter.post(
       [uniqueConnectionIds]
     );
 
-    const { operationId, onedriveSyncJobId, sharepointSyncJobId, teamsScanId } = await withTransaction(async (client) => {
+    const { operationId, onedriveSyncJobId, sharepointSyncJobId, outlookSyncJobId, teamsScanId } = await withTransaction(async (client) => {
       const db: Queryable = { query: client.query.bind(client) };
 
       // Same atomic per-tenant mutex /cleanup takes — a concurrent sync/cleanup for this tenant
@@ -1194,17 +1238,19 @@ cleaningRouter.post(
 
       let newOnedriveSyncJobId: string | null = null;
       let newSharepointSyncJobId: string | null = null;
+      let newOutlookSyncJobId: string | null = null;
       let newTeamsScanId: string | null = null;
 
       for (const conn of connectionRows.rows) {
         if (conn.status === "disconnected") continue;
-        if (conn.cloud_type === "onedrive" || conn.cloud_type === "sharepoint") {
+        if (conn.cloud_type === "onedrive" || conn.cloud_type === "sharepoint" || conn.cloud_type === "outlook") {
           // Exact same insert cloudConnections.ts's POST /:id/resync already does — cloudSyncWorker.ts is untouched.
           const jobInsert = await client.query<{ id: string }>(`INSERT INTO sync_jobs (connection_id, status) VALUES ($1, 'queued') RETURNING id`, [
             conn.id,
           ]);
           if (conn.cloud_type === "onedrive") newOnedriveSyncJobId = jobInsert.rows[0]!.id;
-          else newSharepointSyncJobId = jobInsert.rows[0]!.id;
+          else if (conn.cloud_type === "sharepoint") newSharepointSyncJobId = jobInsert.rows[0]!.id;
+          else newOutlookSyncJobId = jobInsert.rows[0]!.id;
         } else if (conn.cloud_type === "teams") {
           // Same insert startScan() does — decoupled from it here only because startScan() also
           // enqueues immediately, and this needs the id first to record on cleaning_sync_operations
@@ -1217,20 +1263,21 @@ cleaningRouter.post(
         }
       }
 
-      if (!newOnedriveSyncJobId && !newSharepointSyncJobId && !newTeamsScanId) {
+      if (!newOnedriveSyncJobId && !newSharepointSyncJobId && !newOutlookSyncJobId && !newTeamsScanId) {
         throw new ApiError(400, "NOTHING_TO_SYNC", "None of the selected connections can be synced right now");
       }
 
       const opInsert = await client.query<{ id: string }>(
-        `INSERT INTO cleaning_sync_operations (tenant_id, requested_by, onedrive_sync_job_id, sharepoint_sync_job_id, teams_scan_id)
-         VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-        [tenantId, operatorId, newOnedriveSyncJobId, newSharepointSyncJobId, newTeamsScanId]
+        `INSERT INTO cleaning_sync_operations (tenant_id, requested_by, onedrive_sync_job_id, sharepoint_sync_job_id, outlook_sync_job_id, teams_scan_id)
+         VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+        [tenantId, operatorId, newOnedriveSyncJobId, newSharepointSyncJobId, newOutlookSyncJobId, newTeamsScanId]
       );
 
       return {
         operationId: opInsert.rows[0]!.id,
         onedriveSyncJobId: newOnedriveSyncJobId,
         sharepointSyncJobId: newSharepointSyncJobId,
+        outlookSyncJobId: newOutlookSyncJobId,
         teamsScanId: newTeamsScanId,
       };
     });
@@ -1245,6 +1292,7 @@ cleaningRouter.post(
 
     if (onedriveSyncJobId) await enqueueCloudSyncJob({ syncJobId: onedriveSyncJobId });
     if (sharepointSyncJobId) await enqueueCloudSyncJob({ syncJobId: sharepointSyncJobId });
+    if (outlookSyncJobId) await enqueueCloudSyncJob({ syncJobId: outlookSyncJobId });
     if (teamsScanId) await enqueueCleaningScanJob({ scanId: teamsScanId });
 
     res.status(202).json({ operationId, status: "queued" });
@@ -1306,6 +1354,7 @@ interface SyncOperationRow {
   started_at: string;
   onedrive_sync_job_id: string | null;
   sharepoint_sync_job_id: string | null;
+  outlook_sync_job_id: string | null;
   teams_scan_id: string | null;
 }
 
@@ -1342,6 +1391,18 @@ async function buildSyncOperationResult(op: SyncOperationRow): Promise<CleaningS
     subStatuses.push(r.status);
     noteCompletion(r.finishedAt);
   }
+  if (op.outlook_sync_job_id) {
+    const r = await fetchSubResourceStatus("sync_jobs", op.outlook_sync_job_id);
+    byResource.outlook = {
+      status: r.status as CleaningSyncResourceStatus,
+      error: r.error,
+      processed: r.processed,
+      total: r.total,
+      unavailableCount: await countUnavailable(r.connectionId),
+    };
+    subStatuses.push(r.status);
+    noteCompletion(r.finishedAt);
+  }
   if (op.teams_scan_id) {
     const r = await fetchSubResourceStatus("cleaning_scans", op.teams_scan_id);
     byResource.teams = { status: r.status as CleaningSyncResourceStatus, error: r.error, processed: r.processed, total: r.total };
@@ -1358,7 +1419,7 @@ async function buildSyncOperationResult(op: SyncOperationRow): Promise<CleaningS
   };
 }
 
-const SYNC_OPERATION_COLUMNS = "id, started_at, onedrive_sync_job_id, sharepoint_sync_job_id, teams_scan_id";
+const SYNC_OPERATION_COLUMNS = "id, started_at, onedrive_sync_job_id, sharepoint_sync_job_id, outlook_sync_job_id, teams_scan_id";
 
 /** GET /api/cleaning/sync/operations/:operationId — unified status, computed live from whichever sub-resources this operation actually touched. */
 cleaningRouter.get(
@@ -1404,13 +1465,14 @@ cleaningRouter.get(
     const tenantId = accessResults[0]!.tenantId;
 
     const opResult = await query<SyncOperationRow>(
-      `SELECT cso.id, cso.started_at, cso.onedrive_sync_job_id, cso.sharepoint_sync_job_id, cso.teams_scan_id
+      `SELECT cso.id, cso.started_at, cso.onedrive_sync_job_id, cso.sharepoint_sync_job_id, cso.outlook_sync_job_id, cso.teams_scan_id
        FROM cleaning_sync_operations cso
        LEFT JOIN sync_jobs sj1 ON sj1.id = cso.onedrive_sync_job_id
        LEFT JOIN sync_jobs sj2 ON sj2.id = cso.sharepoint_sync_job_id
+       LEFT JOIN sync_jobs sj3 ON sj3.id = cso.outlook_sync_job_id
        LEFT JOIN cleaning_scans cs ON cs.id = cso.teams_scan_id
        WHERE cso.tenant_id = $1
-         AND (sj1.connection_id = ANY($2::uuid[]) OR sj2.connection_id = ANY($2::uuid[]) OR cs.connection_id = ANY($2::uuid[]))
+         AND (sj1.connection_id = ANY($2::uuid[]) OR sj2.connection_id = ANY($2::uuid[]) OR sj3.connection_id = ANY($2::uuid[]) OR cs.connection_id = ANY($2::uuid[]))
        ORDER BY cso.created_at DESC LIMIT 1`,
       [tenantId, connectionIds]
     );

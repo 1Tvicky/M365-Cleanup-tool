@@ -1,21 +1,29 @@
 import { Worker } from "bullmq";
 import { query } from "../db/pool.js";
 import { graphClientForTenant } from "../graph/client.js";
-import { classifyDeleteError, deleteDriveItem, listDriveRootChildren, type DriveOwnerKind } from "../graph/cleanupDeletion.js";
+import {
+  classifyDeleteError,
+  deleteDriveItem,
+  deleteMessage,
+  listDriveRootChildren,
+  listFolderMessages,
+  listMailFoldersRecursive,
+  type DriveOwnerKind,
+} from "../graph/cleanupDeletion.js";
 import { runThrottled } from "../services/rateLimiter.js";
 import { connection as redis } from "./queue.js";
 
 /**
  * Mirrors jobs/cleaningScanWorker.ts's shape (same join-by-id pattern, same runThrottled usage,
  * same reauth-error branching, same connection_events logging), but for executing a confirmed
- * cleanup operation. Only 'onedrive_account'/'sharepoint_site' items are ever processed here —
- * 'channel'/'chat' items are created with status='unsupported' at manifest time (routes/cleaning.ts)
- * and never selected by the `status = 'pending'` query below, so this worker never attempts a Graph
- * call Microsoft doesn't support for this app's application-only permissions.
+ * cleanup operation. Only 'onedrive_account'/'sharepoint_site'/'outlook_mailbox' items are ever
+ * processed here — 'channel'/'chat' items are created with status='unsupported' at manifest time
+ * (routes/cleaning.ts) and never selected by the `status = 'pending'` query below, so this worker
+ * never attempts a Graph call Microsoft doesn't support for this app's application-only permissions.
  *
  * All items in one operation share the same tenant (enforced at manifest-creation time), so only
  * one graphClientForTenant call is needed for the whole job, regardless of how many of the tenant's
- * up-to-3 connections (OneDrive/SharePoint/Teams) are actually touched.
+ * up-to-4 connections (OneDrive/SharePoint/Teams/Outlook) are actually touched.
  */
 
 async function logConnectionEvent(event: string, connectionId: string, tenantId: string, detail: Record<string, unknown> = {}): Promise<void> {
@@ -43,7 +51,7 @@ async function isCancelled(operationId: string): Promise<boolean> {
 interface PendingItem {
   id: string;
   connection_id: string;
-  resource_type: "onedrive_account" | "sharepoint_site";
+  resource_type: "onedrive_account" | "sharepoint_site" | "outlook_mailbox";
   graph_ref: { userId?: string; siteId?: string };
 }
 
@@ -88,6 +96,61 @@ async function executeItem(
   if (firstError) throw firstError;
 }
 
+/**
+ * Deletes every message in every mail folder (all depths) for the mailbox — never the folders
+ * themselves, since distinguished/well-known ones (Inbox, Sent Items, etc.) can't be deleted, only
+ * emptied; see graph/cleanupDeletion.ts's comment on this. Same per-file (per-message) audit
+ * pattern as executeItem above — one cleanup_operation_item_files row per message, keyed by
+ * message.size for the "data cleared" report.
+ */
+async function executeMailboxItem(
+  client: Awaited<ReturnType<typeof graphClientForTenant>>,
+  item: PendingItem,
+  operationId: string
+): Promise<void> {
+  const userId = item.graph_ref.userId!;
+
+  const folderIds = await listMailFoldersRecursive(client, userId);
+  const messages: { folderId: string; message: { id: string; subject: string; size: number } }[] = [];
+  for (const folderId of folderIds) {
+    for (const message of await listFolderMessages(client, userId, folderId)) {
+      messages.push({ folderId, message });
+    }
+  }
+  if (messages.length === 0) return; // already empty — nothing to do, counts as success
+
+  for (const { message } of messages) {
+    await query(
+      `INSERT INTO cleanup_operation_item_files (cleanup_operation_item_id, file_name, graph_item_id, file_size_bytes) VALUES ($1, $2, $3, $4)`,
+      [item.id, message.subject, message.id, message.size]
+    );
+  }
+  await query(`UPDATE cleanup_operation_items SET files_total = $2 WHERE id = $1`, [item.id, messages.length]);
+
+  let firstError: unknown = null;
+  await runThrottled(messages, ({ message }) => deleteMessage(client, userId, message.id), {
+    isCancelled: () => isCancelled(operationId),
+    batchSize: 10,
+    onItemSettled: async ({ message }, result) => {
+      const fileStatus = result.ok ? result.value : "failed"; // "deleted" | "already_gone" | "failed"
+      const errorMessage = result.ok ? null : classifyDeleteError(result.error).message;
+      await query(
+        `UPDATE cleanup_operation_item_files SET status = $3, error_message = $4, completed_at = now()
+         WHERE cleanup_operation_item_id = $1 AND graph_item_id = $2`,
+        [item.id, message.id, fileStatus, errorMessage]
+      );
+      await query(`UPDATE cleanup_operation_items SET files_completed = files_completed + 1 WHERE id = $1`, [item.id]);
+      if (!result.ok && !firstError) firstError = result.error;
+    },
+  });
+  if (firstError) throw firstError;
+}
+
+/** Routes a pending item to the execution path for its resource type — executeItem only ever handles onedrive_account/sharepoint_site, so outlook_mailbox must be dispatched here rather than into it. */
+function executeAnyItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem, operationId: string): Promise<void> {
+  return item.resource_type === "outlook_mailbox" ? executeMailboxItem(client, item, operationId) : executeItem(client, item, operationId);
+}
+
 export const cleanupExecutionWorker = new Worker(
   "cleanup-execution-jobs",
   async (job) => {
@@ -123,7 +186,7 @@ export const cleanupExecutionWorker = new Worker(
       let successful = 0;
       let failed = 0;
 
-      await runThrottled(pending.rows, (item) => executeItem(client, item, operationId), {
+      await runThrottled(pending.rows, (item) => executeAnyItem(client, item, operationId), {
         isCancelled: () => isCancelled(operationId),
         batchSize: 3, // conservative — each item itself fans out into its own (throttled) per-file deletes; tune after the first live test run
         onItemSettled: async (item, result) => {

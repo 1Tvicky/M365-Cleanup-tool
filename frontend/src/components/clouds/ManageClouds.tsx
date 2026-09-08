@@ -1,18 +1,20 @@
 import { useState } from "react";
 import { listConnectionUsers, type ConnectionUserRow, type ManageCloudsRow } from "../../api/clouds";
-import { OneDriveIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
+import { OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 import type { Workload } from "../../types";
 
 const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = {
   onedrive: OneDriveIcon,
   sharepoint: SharePointIcon,
   teams: TeamsIcon,
+  outlook: OutlookIcon,
 };
 
 const CLOUD_LABELS: Record<Workload, string> = {
   onedrive: "OneDrive for Business",
   sharepoint: "SharePoint Online",
   teams: "Microsoft Teams",
+  outlook: "Outlook",
 };
 
 // SharePoint enumerates sites, not people — a tenant with a hundred users can easily have a
@@ -22,6 +24,7 @@ const UNIT_LABELS: Record<Workload, { singular: string; plural: string }> = {
   onedrive: { singular: "User", plural: "Users" },
   teams: { singular: "User", plural: "Users" },
   sharepoint: { singular: "Site", plural: "Sites" },
+  outlook: { singular: "Mailbox", plural: "Mailboxes" },
 };
 
 const STATUS_BADGE: Partial<Record<ManageCloudsRow["status"], { label: string; style: string }>> = {

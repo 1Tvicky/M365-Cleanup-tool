@@ -6,6 +6,7 @@ import {
   getTeamsSummary,
   listCleaningConnections,
   listOneDriveAccounts,
+  listOutlookMailboxes,
   listSharePointSites,
   listTeamsChannels,
   listTeamsDMs,
@@ -39,9 +40,10 @@ interface TenantGroup {
   onedrive?: CleaningConnectionRow;
   sharepoint?: CleaningConnectionRow;
   teams?: CleaningConnectionRow;
+  outlook?: CleaningConnectionRow;
 }
 
-type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "review" | "cleanupConfirm" | "cleanupProgress" | "cleanupResults";
+type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "outlook" | "review" | "cleanupConfirm" | "cleanupProgress" | "cleanupResults";
 
 /**
  * Only these "browsing" views are reflected in the URL (as `?group=<domain>&view=<view>` on the same
@@ -51,7 +53,7 @@ type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "rev
  * deliberately doesn't touch the address bar at all — reloading mid-flow already falls back to
  * Landing today, and that isn't something this change is meant to fix.
  */
-const URL_SYNCED_VIEWS = new Set<View>(["landing", "dashboard", "onedrive", "sharepoint", "teams"]);
+const URL_SYNCED_VIEWS = new Set<View>(["landing", "dashboard", "onedrive", "sharepoint", "teams", "outlook"]);
 
 function cleaningUrlFor(view: View, activeGroup: TenantGroup | null): string {
   if (view === "landing" || !activeGroup) return "/cleaning";
@@ -98,17 +100,19 @@ function pruneToFound<T>(map: Map<string, T>, foundIds: string[]): Map<string, T
   return next;
 }
 
-/** Only 'oneDrive'/'sharePoint' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
+/** Only 'oneDrive'/'sharePoint'/'outlook' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
 function buildCleanupManifest(
   group: TenantGroup,
   selectedOneDrive: Map<string, CleaningResourceRow>,
   selectedSharePoint: Map<string, CleaningResourceRow>,
+  selectedOutlook: Map<string, CleaningResourceRow>,
   selectedChannels: Map<string, CleaningChannelRow>,
   selectedChats: Map<string, CleaningChatRow>
 ): CleanupManifest {
   const manifest: CleanupManifest = {};
   if (selectedOneDrive.size > 0 && group.onedrive) manifest.oneDrive = { connectionId: group.onedrive.id, ids: [...selectedOneDrive.keys()] };
   if (selectedSharePoint.size > 0 && group.sharepoint) manifest.sharePoint = { connectionId: group.sharepoint.id, ids: [...selectedSharePoint.keys()] };
+  if (selectedOutlook.size > 0 && group.outlook) manifest.outlook = { connectionId: group.outlook.id, ids: [...selectedOutlook.keys()] };
   if (selectedChannels.size > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: [...selectedChannels.keys()] };
   if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
   return manifest;
@@ -150,6 +154,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
 
   const [selectedOneDrive, setSelectedOneDrive] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedSharePoint, setSelectedSharePoint] = useState<Map<string, CleaningResourceRow>>(new Map());
+  const [selectedOutlook, setSelectedOutlook] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
@@ -215,18 +220,20 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     });
 
     if (!activeGroup || !hasSelection(totals)) return;
-    const manifest = buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedChannels, selectedChats);
+    const manifest = buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedOutlook, selectedChannels, selectedChats);
     try {
       const { foundIds } = await validateCleanup(manifest);
       const removedCount =
         selectedOneDrive.size -
         foundIds.oneDrive.length +
         (selectedSharePoint.size - foundIds.sharePoint.length) +
+        (selectedOutlook.size - foundIds.outlook.length) +
         (selectedChannels.size - foundIds.channels.length) +
         (selectedChats.size - foundIds.chats.length);
       if (removedCount > 0) {
         setSelectedOneDrive((prev) => pruneToFound(prev, foundIds.oneDrive));
         setSelectedSharePoint((prev) => pruneToFound(prev, foundIds.sharePoint));
+        setSelectedOutlook((prev) => pruneToFound(prev, foundIds.outlook));
         setSelectedChannels((prev) => pruneToFound(prev, foundIds.channels));
         setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
         setReconciliationBanner(
@@ -244,6 +251,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       oneDriveBytes: [...selectedOneDrive.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
       sharePointSites: selectedSharePoint.size,
       sharePointBytes: [...selectedSharePoint.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
+      outlookMailboxes: selectedOutlook.size,
+      outlookItems: [...selectedOutlook.values()].reduce((s, r) => s + r.itemCount, 0),
       teamsChannels: selectedChannels.size,
       teamsMessages: [...selectedChannels.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       teamsChannelsWithKnownCount: [...selectedChannels.values()].filter((r) => r.countStatus === "completed").length,
@@ -251,7 +260,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       dmMessages: [...selectedChats.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       dmsWithKnownCount: [...selectedChats.values()].filter((r) => r.countStatus === "completed").length,
     }),
-    [selectedOneDrive, selectedSharePoint, selectedChannels, selectedChats]
+    [selectedOneDrive, selectedSharePoint, selectedOutlook, selectedChannels, selectedChats]
   );
 
   function openTenant(group: TenantGroup) {
@@ -259,6 +268,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     // clearing them would let a review mix data from two different customers' tenants together.
     setSelectedOneDrive(new Map());
     setSelectedSharePoint(new Map());
+    setSelectedOutlook(new Map());
     setSelectedChannels(new Map());
     setSelectedChats(new Map());
     setActiveGroup(group);
@@ -272,7 +282,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   if (view === "cleanupConfirm" && activeGroup) {
     return (
       <CleanupConfirmation
-        manifest={buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedChannels, selectedChats)}
+        manifest={buildCleanupManifest(activeGroup, selectedOneDrive, selectedSharePoint, selectedOutlook, selectedChannels, selectedChats)}
         onBack={() => setView("review")}
         onStarted={(operationId) => {
           if (onCleanupStarted) {
@@ -303,6 +313,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         onDone={() => {
           setSelectedOneDrive(new Map());
           setSelectedSharePoint(new Map());
+          setSelectedOutlook(new Map());
           setSelectedChannels(new Map());
           setSelectedChats(new Map());
           setCleanupOperationId(null);
@@ -314,7 +325,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
 
   // Only shown on the actual selection tables — not on the dashboard or landing page, where it
   // would float over content with no table underneath it for the selection to relate to.
-  const showSelectionBar = (view === "onedrive" || view === "sharepoint" || view === "teams") && hasSelection(totals);
+  const showSelectionBar = (view === "onedrive" || view === "sharepoint" || view === "outlook" || view === "teams") && hasSelection(totals);
 
   return (
     <div className={`px-8 py-6 ${showSelectionBar ? "pb-24" : ""}`}>
@@ -347,6 +358,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
               onOpenOneDrive={() => setView("onedrive")}
               onOpenSharePoint={() => setView("sharepoint")}
               onOpenTeams={() => setView("teams")}
+              onOpenOutlook={() => setView("outlook")}
               onSyncFinished={handleSyncFinished}
             />
           </>
@@ -358,6 +370,10 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
 
         {view === "sharepoint" && activeGroup?.sharepoint && (
           <SharePointView connectionId={activeGroup.sharepoint.id} selected={selectedSharePoint} setSelected={setSelectedSharePoint} />
+        )}
+
+        {view === "outlook" && activeGroup?.outlook && (
+          <OutlookView connectionId={activeGroup.outlook.id} selected={selectedOutlook} setSelected={setSelectedOutlook} />
         )}
 
         {view === "teams" && activeGroup?.teams && (
@@ -471,10 +487,11 @@ function syncResourceLabel(
   return "✗"; // genuinely 'failed' or 'cancelled' — the sync job itself didn't complete
 }
 
-const DISCOVERING_LABEL: Record<"onedrive" | "sharepoint" | "teams", string> = {
+const DISCOVERING_LABEL: Record<"onedrive" | "sharepoint" | "teams" | "outlook", string> = {
   onedrive: "Finding accounts…",
   sharepoint: "Finding sites…",
   teams: "Finding teams…",
+  outlook: "Finding mailboxes…",
 };
 
 /**
@@ -524,7 +541,7 @@ function CloudSyncControl({
 }: {
   connectionId: string;
   /** Which of the operation's byResource slots belongs to this card — must be explicit, not guessed, since an operation can (e.g. an older bundled sync) have more than one slot populated. */
-  cloudType: "onedrive" | "sharepoint" | "teams";
+  cloudType: "onedrive" | "sharepoint" | "teams" | "outlook";
   lastSyncedAt: string | null;
   onSyncFinished: () => void;
 }) {
@@ -629,16 +646,19 @@ function Dashboard({
   onOpenOneDrive,
   onOpenSharePoint,
   onOpenTeams,
+  onOpenOutlook,
   onSyncFinished,
 }: {
   group: TenantGroup;
   onOpenOneDrive: () => void;
   onOpenSharePoint: () => void;
   onOpenTeams: () => void;
+  onOpenOutlook: () => void;
   onSyncFinished: () => void;
 }) {
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [sharePointTotals, setSharePointTotals] = useState<{ count: number; bytes: number } | null>(null);
+  const [outlookTotals, setOutlookTotals] = useState<{ count: number; items: number } | null>(null);
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
 
   const refreshTotals = useCallback(() => {
@@ -653,6 +673,11 @@ function Dashboard({
     if (group.sharepoint) {
       listSharePointSites(group.sharepoint.id, { sort: "storage", pageSize: 200 }).then(({ sites, total }) => {
         setSharePointTotals({ count: total, bytes: sites.reduce((s, a) => s + a.storageUsedBytes, 0) });
+      });
+    }
+    if (group.outlook) {
+      listOutlookMailboxes(group.outlook.id, { pageSize: 200 }).then(({ mailboxes, total }) => {
+        setOutlookTotals({ count: total, items: mailboxes.reduce((s, m) => s + m.itemCount, 0) });
       });
     }
   }, [group]);
@@ -768,6 +793,32 @@ function Dashboard({
           syncControl={
             group.teams && (
               <CloudSyncControl connectionId={group.teams.id} cloudType="teams" lastSyncedAt={group.teams.lastSyncedAt} onSyncFinished={handleCloudSyncFinished} />
+            )
+          }
+        />
+        <ServiceCard
+          icon="📧"
+          name="Outlook"
+          stats={
+            group.outlook ? (
+              outlookTotals ? (
+                <>
+                  <div>{outlookTotals.count.toLocaleString()}{outlookTotals.count > 0 ? "+" : ""} mailboxes</div>
+                  <div>{outlookTotals.items.toLocaleString()} mail items</div>
+                </>
+              ) : (
+                <div className="italic text-slate-400">Loading…</div>
+              )
+            ) : (
+              <div className="text-slate-400">Not connected</div>
+            )
+          }
+          action="View Mailboxes"
+          onClick={onOpenOutlook}
+          disabled={!group.outlook}
+          syncControl={
+            group.outlook && (
+              <CloudSyncControl connectionId={group.outlook.id} cloudType="outlook" lastSyncedAt={group.outlook.lastSyncedAt} onSyncFinished={handleCloudSyncFinished} />
             )
           }
         />
@@ -950,6 +1001,59 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
           setSelected(next);
         }}
         emptyMessage="No SharePoint sites found."
+      />
+    </div>
+  );
+}
+
+function OutlookView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
+  const [search, setSearch] = useState("");
+  // Only "name" — the shared listCleaningResources helper's "storage" sort orders by
+  // storage_used_bytes, which is always 0 here (no cheap per-mailbox byte quota under application
+  // permissions; see cloudEnumeration.ts's getUserMailSummary), so offering it would just look broken.
+  const fetcher = useCallback(
+    (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) =>
+      listOutlookMailboxes(connectionId, opts).then((r) => ({ rows: r.mailboxes, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search, "name");
+
+  const columns: DiscoveryColumn<CleaningResourceRow>[] = [
+    { label: "User Name", render: (r) => r.name },
+    { label: "User Email", render: (r) => r.detail },
+    { label: "Mail Items", align: "right", render: (r) => r.itemCount.toLocaleString() },
+    { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
+  ];
+
+  return (
+    <div>
+      <h2 className="mb-1 text-lg font-semibold text-slate-800">Outlook</h2>
+      <p className="mb-5 text-sm text-slate-500">All mailboxes and their mail item counts</p>
+      <DiscoveryTable
+        title="Outlook Mailboxes"
+        columns={columns}
+        rows={rows}
+        loading={loading}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search users…"
+        selected={new Set(selected.keys())}
+        onToggle={(id) => {
+          const row = rows.find((r) => r.id === id);
+          if (row) toggleInMap(selected, setSelected, id, row);
+        }}
+        onToggleAll={() => {
+          const allSelected = rows.every((r) => selected.has(r.id));
+          const next = new Map(selected);
+          for (const r of rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
+          setSelected(next);
+        }}
+        emptyMessage="No Outlook mailboxes found."
       />
     </div>
   );
@@ -1157,6 +1261,12 @@ function ReviewPage({ totals, onBack, onContinue }: { totals: SelectionTotals; o
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <span className="text-sm font-medium text-slate-700">SharePoint</span>
             <span className="text-sm text-slate-600">{totals.sharePointSites.toLocaleString()} sites · {formatBytes(totals.sharePointBytes)}</span>
+          </div>
+        )}
+        {totals.outlookMailboxes > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <span className="text-sm font-medium text-slate-700">Outlook</span>
+            <span className="text-sm text-slate-600">{totals.outlookMailboxes.toLocaleString()} mailboxes · {totals.outlookItems.toLocaleString()} mail items</span>
           </div>
         )}
         {totals.teamsChannels > 0 && (

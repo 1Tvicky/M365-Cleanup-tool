@@ -1,11 +1,12 @@
 import { CONNECTORS } from "../../api/mockData";
 import type { Workload } from "../../types";
-import { OneDriveIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
+import { OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 
 const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = {
   onedrive: OneDriveIcon,
   sharepoint: SharePointIcon,
   teams: TeamsIcon,
+  outlook: OutlookIcon,
 };
 
 // Per-connector "Add Cloud" button color and label tint, matching each product's brand color.
@@ -13,6 +14,7 @@ const ACCENTS: Record<Workload, { button: string; label: string }> = {
   onedrive: { button: "#0078D4", label: "text-slate-800" },
   sharepoint: { button: "#038387", label: "text-slate-800" },
   teams: { button: "#5B5FC7", label: "text-[#4550A8]" },
+  outlook: { button: "#0078D4", label: "text-slate-800" },
 };
 
 /**

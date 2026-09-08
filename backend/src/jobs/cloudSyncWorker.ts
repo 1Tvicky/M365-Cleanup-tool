@@ -5,6 +5,7 @@ import {
   getSiteDriveQuota,
   getUserDriveQuota,
   getUserJoinedTeamsCount,
+  getUserMailSummary,
   listAllUsers,
   searchSites,
   type BasicUser,
@@ -158,6 +159,41 @@ async function syncTeams(client: Awaited<ReturnType<typeof graphClientForTenant>
   return failed;
 }
 
+async function syncOutlook(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, users: BasicUser[]): Promise<number> {
+  let failed = 0;
+  await runThrottled(users, (user) => getUserMailSummary(client, user.id), {
+    isCancelled: () => isCancelled(syncJobId),
+    // Same reasoning as syncOneDrive's batchSize bump — a mail-folder listing is a comparably light call.
+    batchSize: 40,
+    onItemSettled: async (user, result) => {
+      if (result.ok && result.value !== null) {
+        await upsertConnectionUser(connectionId, {
+          graphUserId: user.id,
+          upn: user.upn,
+          displayName: user.displayName,
+          storageUsedBytes: 0, // not meaningful for Outlook — see graph/cloudEnumeration.ts's getUserMailSummary
+          itemCount: result.value.itemCount,
+          syncStatus: "synced",
+          errorMessage: null,
+        });
+      } else {
+        failed++;
+        await upsertConnectionUser(connectionId, {
+          graphUserId: user.id,
+          upn: user.upn,
+          displayName: user.displayName,
+          storageUsedBytes: 0,
+          itemCount: 0,
+          syncStatus: "failed",
+          errorMessage: result.ok ? "No mailbox provisioned for this user" : String(result.error),
+        });
+      }
+      await query(`UPDATE sync_jobs SET processed_users = processed_users + 1 WHERE id = $1`, [syncJobId]);
+    },
+  });
+  return failed;
+}
+
 /** Each `connection_users` row is a SITE, not a person, for SharePoint — see docs/graph-api-limitations.md. */
 async function syncSharePoint(client: Awaited<ReturnType<typeof graphClientForTenant>>, connectionId: string, syncJobId: string, sites: SiteSummary[]): Promise<number> {
   let failed = 0;
@@ -237,9 +273,13 @@ export const cloudSyncWorker = new Worker(
         const users = await listAllUsers(client);
         await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
         await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
-        failed = info.cloud_type === "onedrive"
-          ? await syncOneDrive(client, info.connection_id, syncJobId, users)
-          : await syncTeams(client, info.connection_id, syncJobId, users);
+        if (info.cloud_type === "onedrive") {
+          failed = await syncOneDrive(client, info.connection_id, syncJobId, users);
+        } else if (info.cloud_type === "outlook") {
+          failed = await syncOutlook(client, info.connection_id, syncJobId, users);
+        } else {
+          failed = await syncTeams(client, info.connection_id, syncJobId, users);
+        }
       }
 
       const cancelled = await isCancelled(syncJobId);

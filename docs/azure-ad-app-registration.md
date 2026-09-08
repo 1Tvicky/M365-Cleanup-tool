@@ -1,6 +1,6 @@
 # Azure AD App Registration Checklist
 
-Deliverable 1 of 4 — M365 Data Cleanup Utility (Phase 1: Teams, OneDrive, SharePoint)
+Deliverable 1 of 4 — M365 Data Cleanup Utility (Phase 1: Teams, OneDrive, SharePoint; Outlook added later)
 
 This app is multi-tenant (hundreds+ customer tenants, self-serve admin consent), so it must be
 registered as a **multi-tenant** Azure AD application in CloudFuze's own Azure AD, and each
@@ -63,13 +63,15 @@ authorization gate for the whole tool.
 | `User.Read.All` | Application | Resolve users for the tenant's user/site picker, and to enumerate users for OneDrive/Teams connection sync | Connect, Cleanup |
 | `Reports.Read.All` | Application | Pull storage usage reports to size the preview without walking every drive | Preview |
 | `ChannelMessage.Read.All` | Application | **Added for the Cleaning module discovery phase.** Graph has no channel message-count endpoint — this is required to paginate a channel's messages (and each message's replies) to compute a real count. Not requested until this feature needed it. | Cleaning → Teams channel message counts |
+| `Mail.ReadWrite` | Application | **Added for the Outlook cloud.** Enumerate mail folders (item counts) and delete messages — one permission covers both, same pattern as `Files.ReadWrite.All` for OneDrive. Deletion is message-by-message only: distinguished/well-known folders (Inbox, Sent Items, Drafts, etc.) return `ErrorDeleteDistinguishedFolder` if you try to delete the folder itself, so cleanup empties folders by deleting their messages, never the folders. | Cleaning → Outlook discovery + cleanup |
 
-**Action required for existing connections:** `ChannelMessage.Read.All` was added after some tenants
-already granted consent — admin consent only covers the permissions that existed at consent time,
-so any Teams cloud connected *before* this permission was added must be reconnected (Manage Clouds
-→ disconnect → Add Cloud → Microsoft Teams again) before channel message counts work for it. Until
-reconnected, the Cleaning UI reports counts as unavailable rather than failing silently or showing
-a fake number.
+**Action required for existing connections:** `ChannelMessage.Read.All` (and now `Mail.ReadWrite`)
+were added after some tenants already granted consent — admin consent only covers the permissions
+that existed at consent time, so any tenant connected *before* one of these was added must
+reconnect (Manage Clouds → disconnect → Add Cloud → any cloud type again — consent is tenant-wide,
+so reconnecting one cloud type re-covers all of them) before the corresponding feature works for it.
+Until reconnected, the Cleaning UI reports counts as unavailable rather than failing silently or
+showing a fake number.
 
 **Not requested in v1:** `Chat.ReadWrite.All` / any chat-delete permission. Per your decision to
 defer Teams DM deletion to v2, `Chat.Read.All` is granted for *reporting only* (chat/DM counts and
@@ -79,9 +81,10 @@ bulk-delete arbitrary 1:1/group chat messages the way they can channel messages 
 message's own author (delegated context) or specific compliance/eDiscovery flows can remove chat
 content. Re-evaluate this permission set when DM deletion is scoped for v2.
 
-Do **not** request `Directory.ReadWrite.All`, `Mail.*`, or any permission not in the table — Graph
-admin-consent screens show the full requested list to the customer's Global Admin, and an
-over-broad ask is the #1 reason customers stall or reject consent.
+Do **not** request `Directory.ReadWrite.All` or any permission not in the table — Graph admin-consent
+screens show the full requested list to the customer's Global Admin, and an over-broad ask is the
+#1 reason customers stall or reject consent. (`Mail.ReadWrite` is in the table above, for the
+Outlook cloud specifically — don't read this line as still excluding it.)
 
 ## 4. Admin consent flow — legacy, superseded by §4a
 

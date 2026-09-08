@@ -49,6 +49,25 @@ export function TeamsIcon({ className }: { className?: string }) {
   );
 }
 
+/**
+ * Outlook mark — a blue "O" ring behind a white envelope, in the general shape/color family of the
+ * official icon (#0078D4/#28A8EA, same blues as OneDrive). Unlike the three above, this one is a
+ * reasonable approximation, not a pixel-verified trace — no actual Outlook icon asset was available
+ * to sample from.
+ */
+export function OutlookIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden>
+      <circle cx="18" cy="24" r="15" fill="#0078D4" />
+      <circle cx="18" cy="24" r="8" fill="#fff" />
+      <circle cx="18" cy="24" r="8" fill="#0078D4" opacity=".15" />
+      <path d="M25 15h15c1.7 0 3 1.3 3 3v18c0 1.7-1.3 3-3 3H25V15Z" fill="#0364B8" />
+      <path d="M28 19h13.5L34.7 25 28 19Z" fill="#28A8EA" />
+      <path d="M28 19v16h13.5L28 19Z" fill="#fff" opacity=".9" />
+    </svg>
+  );
+}
+
 /** Four-color M365 "waffle" badge — used to represent a whole connected tenant (all three workloads under one consent grant), not a single workload. */
 export function Microsoft365Icon({ className }: { className?: string }) {
   return (

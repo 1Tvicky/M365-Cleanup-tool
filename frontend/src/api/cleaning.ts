@@ -97,6 +97,10 @@ export function listSharePointSites(connectionId: string, opts: ListOpts = {}): 
   return rawFetch(`/api/cleaning/connections/${connectionId}/sharepoint?${toQuery(opts)}`);
 }
 
+export function listOutlookMailboxes(connectionId: string, opts: ListOpts = {}): Promise<{ mailboxes: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/outlook?${toQuery(opts)}`);
+}
+
 export function getTeamsSummary(connectionId: string): Promise<CleaningTeamsSummary> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/teams/summary`);
 }
@@ -114,12 +118,12 @@ export function calculateTeamsMessageCounts(connectionId: string): Promise<{ sta
 }
 
 /**
- * Cleanup (deletion) execution. Only 'onedrive_account'/'sharepoint_site' items are ever actually
- * removed — Microsoft Graph has no application-permission (unattended) path to delete Teams
- * channel or chat messages, so 'channel'/'chat' items always resolve to 'unsupported', never a
- * faked success. See the cleanup-execution plan for the full rationale.
+ * Cleanup (deletion) execution. 'onedrive_account'/'sharepoint_site'/'outlook_mailbox' items are
+ * ever actually removed — Microsoft Graph has no application-permission (unattended) path to
+ * delete Teams channel or chat messages, so 'channel'/'chat' items always resolve to 'unsupported',
+ * never a faked success. See the cleanup-execution plan for the full rationale.
  */
-export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "channel" | "chat";
+export type CleanupResourceType = "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "channel" | "chat";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 
@@ -127,17 +131,18 @@ export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed
 export interface CleanupManifest {
   oneDrive?: { connectionId: string; ids: string[] };
   sharePoint?: { connectionId: string; ids: string[] };
+  outlook?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
   valid: boolean;
-  summary: { oneDriveAccounts: number; sharePointSites: number; channels: number; chats: number };
+  summary: { oneDriveAccounts: number; sharePointSites: number; outlookMailboxes: number; channels: number; chats: number };
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
   /** Ids from the submitted manifest that resolved successfully, grouped by slot — used to reconcile a selection after a sync (drop ids no longer found). */
-  foundIds: { oneDrive: string[]; sharePoint: string[]; channels: string[]; chats: string[] };
+  foundIds: { oneDrive: string[]; sharePoint: string[]; outlook: string[]; channels: string[]; chats: string[] };
 }
 
 export interface CleanupOperationRow {
@@ -260,6 +265,7 @@ export interface CleaningSyncOperation {
     // access block — "completed_with_errors" almost always means this, not that sync itself broke.
     onedrive?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
     sharepoint?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
+    outlook?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number; unavailableCount: number };
     teams?: { status: CleaningSyncResourceStatus; error: string | null; processed: number; total: number };
   };
 }

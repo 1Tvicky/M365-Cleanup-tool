@@ -7,11 +7,11 @@ import type { Client } from "@microsoft/microsoft-graph-client";
  * its `deleteDocumentLibrary` deletes the library container itself, which is not what this module
  * does; see the cleanup-execution plan for why these are deliberately not reused).
  *
- * Only OneDrive and SharePoint have a real, application-permission delete path. Deleting a Teams
- * channel or chat *message* requires a delegated (signed-in user present) permission — Microsoft
- * Graph does not support it for an unattended application-only service like this one — so there
- * are no equivalent functions here for channels/chats; callers must mark those items 'unsupported'
- * without ever calling Graph for them.
+ * OneDrive, SharePoint, and Outlook mail all have a real, application-permission delete path.
+ * Deleting a Teams channel or chat *message* requires a delegated (signed-in user present)
+ * permission — Microsoft Graph does not support it for an unattended application-only service like
+ * this one — so there are no equivalent functions here for channels/chats; callers must mark those
+ * items 'unsupported' without ever calling Graph for them.
  */
 
 export type DriveOwnerKind = "user" | "site";
@@ -79,4 +79,71 @@ export function classifyDeleteError(err: unknown): { code: string; message: stri
     return { code: "CONFLICT", message: "This item is locked or in use and couldn't be removed. It can be retried." };
   }
   return { code: String(status ?? "UNKNOWN"), message: String((err as { message?: string })?.message ?? err) };
+}
+
+/**
+ * Outlook mail. Deleting a *folder* is not an option here the way it is for a OneDrive/SharePoint
+ * top-level item: distinguished/well-known folders (Inbox, Sent Items, Drafts, Deleted Items, Junk
+ * Email, etc.) return ErrorDeleteDistinguishedFolder if you try — Exchange protects them from
+ * deletion, only their *contents* can be cleared. So cleanup here always means recursing every
+ * folder and deleting the messages inside, never the folder itself — this also means it works
+ * uniformly for distinguished and custom folders alike, with no need to tell them apart.
+ */
+
+/** Every mail folder id in the mailbox, at every depth — BFS over childFolders, starting from the top-level list. */
+export async function listMailFoldersRecursive(client: Client, userId: string): Promise<string[]> {
+  const folderIds: string[] = [];
+  let queue: string[] = [];
+
+  let url: string | undefined = `/users/${userId}/mailFolders?$select=id&$top=100`;
+  while (url) {
+    const res: any = await client.api(url).get();
+    for (const folder of res.value as any[]) queue.push(folder.id);
+    url = res["@odata.nextLink"];
+  }
+
+  while (queue.length > 0) {
+    const folderId = queue.shift()!;
+    folderIds.push(folderId);
+    let childUrl: string | undefined = `/users/${userId}/mailFolders/${folderId}/childFolders?$select=id&$top=100`;
+    while (childUrl) {
+      const res: any = await client.api(childUrl).get();
+      for (const folder of res.value as any[]) queue.push(folder.id);
+      childUrl = res["@odata.nextLink"];
+    }
+  }
+  return folderIds;
+}
+
+export interface MailMessage {
+  id: string;
+  subject: string;
+  /** Bytes, per Graph's message.size (body + attachments) — captured at listing time, same reasoning as DriveRootChild.size. */
+  size: number;
+}
+
+/** Messages directly in one folder (not its child folders — those are separate entries from listMailFoldersRecursive, walked independently). */
+export async function listFolderMessages(client: Client, userId: string, folderId: string): Promise<MailMessage[]> {
+  const messages: MailMessage[] = [];
+  let url: string | undefined = `/users/${userId}/mailFolders/${folderId}/messages?$select=id,subject,size&$top=200`;
+
+  while (url) {
+    const res: any = await client.api(url).get();
+    for (const m of res.value as any[]) {
+      messages.push({ id: m.id, subject: m.subject || "(no subject)", size: Number(m.size ?? 0) });
+    }
+    url = res["@odata.nextLink"];
+  }
+  return messages;
+}
+
+/** Deletes one message. A 404 means it's already gone — treated as success, never a failure, so retries stay idempotent (same convention as deleteDriveItem). */
+export async function deleteMessage(client: Client, userId: string, messageId: string): Promise<DriveItemDeleteResult> {
+  try {
+    await client.api(`/users/${userId}/messages/${messageId}`).delete();
+    return "deleted";
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    throw err;
+  }
 }

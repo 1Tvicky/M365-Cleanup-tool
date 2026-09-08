@@ -5,6 +5,9 @@ export interface SelectionTotals {
   oneDriveBytes: number;
   sharePointSites: number;
   sharePointBytes: number;
+  outlookMailboxes: number;
+  /** Mail item count, not bytes — no cheap per-mailbox byte quota exists under application permissions (see backend/src/graph/cloudEnumeration.ts's getUserMailSummary). */
+  outlookItems: number;
   teamsChannels: number;
   teamsMessages: number;
   /** How many of the selected channels have an actual computed count — lets the summary tell "0 messages" (genuinely counted) apart from "count not known yet" for the same selection. */
@@ -21,7 +24,7 @@ export function messagesFragment(selectedCount: number, knownCount: number, tota
 }
 
 export function hasSelection(t: SelectionTotals): boolean {
-  return t.oneDriveAccounts + t.sharePointSites + t.teamsChannels + t.dms > 0;
+  return t.oneDriveAccounts + t.sharePointSites + t.outlookMailboxes + t.teamsChannels + t.dms > 0;
 }
 
 /** "3 accounts selected · 450 GB" style summary, sticky at the bottom while a selection exists. */
@@ -31,6 +34,7 @@ export function SelectionSummary({ totals, onReview }: { totals: SelectionTotals
   const parts: string[] = [];
   if (totals.oneDriveAccounts > 0) parts.push(`${totals.oneDriveAccounts.toLocaleString()} OneDrive account${totals.oneDriveAccounts === 1 ? "" : "s"} · ${formatBytes(totals.oneDriveBytes)}`);
   if (totals.sharePointSites > 0) parts.push(`${totals.sharePointSites.toLocaleString()} SharePoint site${totals.sharePointSites === 1 ? "" : "s"} · ${formatBytes(totals.sharePointBytes)}`);
+  if (totals.outlookMailboxes > 0) parts.push(`${totals.outlookMailboxes.toLocaleString()} Outlook mailbox${totals.outlookMailboxes === 1 ? "" : "es"} · ${totals.outlookItems.toLocaleString()} mail items`);
   if (totals.teamsChannels > 0)
     parts.push(
       `${totals.teamsChannels.toLocaleString()} Teams channel${totals.teamsChannels === 1 ? "" : "s"} · ${messagesFragment(totals.teamsChannels, totals.teamsChannelsWithKnownCount, totals.teamsMessages)}`
