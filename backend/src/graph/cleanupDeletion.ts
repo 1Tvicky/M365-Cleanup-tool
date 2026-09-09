@@ -7,11 +7,16 @@ import type { Client } from "@microsoft/microsoft-graph-client";
  * its `deleteDocumentLibrary` deletes the library container itself, which is not what this module
  * does; see the cleanup-execution plan for why these are deliberately not reused).
  *
- * OneDrive, SharePoint, and Outlook mail all have a real, application-permission delete path.
- * Deleting a Teams channel or chat *message* requires a delegated (signed-in user present)
+ * OneDrive, SharePoint, and Outlook mail all have a real, application-permission delete path — and,
+ * as of this file's deleteDriveItem/deleteMessage, a genuine *permanent* delete path too (Graph's
+ * `permanentDelete` action, GA, called directly on the same resource id as a straight alternative to
+ * plain DELETE rather than a required follow-up to it — no recycle-bin lookup step exists or is
+ * needed). Deleting a Teams channel or chat *message* requires a delegated (signed-in user present)
  * permission — Microsoft Graph does not support it for an unattended application-only service like
  * this one — so there are no equivalent functions here for channels/chats; callers must mark those
- * items 'unsupported' without ever calling Graph for them.
+ * items 'unsupported' without ever calling Graph for them. Calendar/Contacts (deleteCalendarEvent/
+ * deleteContact below) deliberately remain plain soft-delete — permanent deletion is scoped to
+ * OneDrive/SharePoint/Outlook-mail only.
  */
 
 export type DriveOwnerKind = "user" | "site";
@@ -52,13 +57,45 @@ export async function listDriveRootChildren(client: Client, kind: DriveOwnerKind
 
 export type DriveItemDeleteResult = "deleted" | "already_gone";
 
-/** Deletes one drive item (moves it to the Graph recycle bin). A 404 means it's already gone — treated as success, never a failure, so retries stay idempotent. */
-export async function deleteDriveItem(client: Client, kind: DriveOwnerKind, id: string, itemId: string): Promise<DriveItemDeleteResult> {
+/**
+ * Deletes one drive item — either straight to the recycle bin (plain DELETE, the pre-existing
+ * behavior) or, when `permanent` is true, via Graph's `permanentDelete` action called directly on
+ * the item's existing id, as a straight alternative to plain DELETE rather than a required
+ * follow-up to it (verified against the current Microsoft Graph docs: "unlike Delete driveItem,
+ * which sends the item to the recycle bin"). permanentDelete skips the recycle bin entirely in one
+ * call; a folder's children go with it either way, since deleting a folder already recursively
+ * removes its contents. Both paths use the same least-privileged application permissions this app
+ * already has (Files.ReadWrite.All / Sites.ReadWrite.All) — permanentDelete needs no new Graph
+ * permission or customer re-consent.
+ *
+ * Which one runs is chosen per cleanup operation on the confirmation screen (see
+ * components/cleaning/CleanupConfirmation.tsx / cleanup_operations.deletion_mode), not hardcoded.
+ *
+ * A 404 means it's already gone under this id — whether that's because it was never touched, was
+ * separately soft- or hard-deleted by something else, or was already removed by a prior partial run
+ * — treated as success, never a failure, so retries stay idempotent.
+ *
+ * Known limitation of the permanent path (not engineered around — see
+ * docs/azure-ad-app-registration.md): Microsoft has acknowledged an unresolved, unexplained issue
+ * where at very large batch scale a small fraction of SharePoint permanentDelete calls still land
+ * the item in the recycle bin instead of purging it, indistinguishable from success at the API
+ * level (still returns 204).
+ */
+export async function deleteDriveItem(client: Client, kind: DriveOwnerKind, id: string, itemId: string, permanent: boolean): Promise<DriveItemDeleteResult> {
+  const resourceType = kind === "user" ? "onedrive_account" : "sharepoint_site";
   try {
-    await client.api(driveItemPath(kind, id, itemId)).delete();
+    if (permanent) {
+      // No request body per the Graph docs for this action — pass undefined (not {}) so the SDK's
+      // JSON.stringify(content) never runs and no body is actually sent on the wire.
+      await client.api(`${driveItemPath(kind, id, itemId)}/permanentDelete`).post(undefined);
+      console.log(`[cleanup.permanent_delete] completed resourceType=${resourceType}`);
+    } else {
+      await client.api(driveItemPath(kind, id, itemId)).delete();
+    }
     return "deleted";
   } catch (err) {
     if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    if (permanent) console.warn(`[cleanup.permanent_delete] failed resourceType=${resourceType}`);
     throw err;
   }
 }
@@ -165,13 +202,36 @@ export async function listFolderMessages(client: Client, userId: string, folderI
   return messages;
 }
 
-/** Deletes one message. A 404 means it's already gone — treated as success, never a failure, so retries stay idempotent (same convention as deleteDriveItem). */
-export async function deleteMessage(client: Client, userId: string, messageId: string): Promise<DriveItemDeleteResult> {
+/**
+ * Deletes one message — either straight to Deleted Items (plain DELETE, the pre-existing behavior)
+ * or, when `permanent` is true, via Graph's `permanentDelete` action called directly on the
+ * message's existing id (verified against current Microsoft Graph docs, GA since April 2025): moves
+ * it straight to the Purges folder in the mailbox dumpster, skipping Deleted Items entirely in one
+ * call. Both paths use the same `Mail.ReadWrite` application permission this app already has —
+ * permanentDelete needs no new Graph permission or customer re-consent.
+ *
+ * Which one runs is chosen per cleanup operation on the confirmation screen (see
+ * components/cleaning/CleanupConfirmation.tsx / cleanup_operations.deletion_mode), not hardcoded.
+ *
+ * A 404 means it's already gone under this id — same idempotency convention as deleteDriveItem
+ * (covers "never touched," "already in Deleted Items from something else," and "already purged by a
+ * prior partial run" uniformly). Never touches the Deleted Items folder itself, and never called for
+ * Calendar/Contacts (deleteCalendarEvent/deleteContact below stay on plain soft delete — out of
+ * scope for permanent deletion regardless of this flag).
+ */
+export async function deleteMessage(client: Client, userId: string, messageId: string, permanent: boolean): Promise<DriveItemDeleteResult> {
   try {
-    await client.api(`/users/${userId}/messages/${messageId}`).delete();
+    if (permanent) {
+      // No request body per the Graph docs for this action — see deleteDriveItem's identical note.
+      await client.api(`/users/${userId}/messages/${messageId}/permanentDelete`).post(undefined);
+      console.log(`[cleanup.permanent_delete] completed resourceType=outlook_mailbox`);
+    } else {
+      await client.api(`/users/${userId}/messages/${messageId}`).delete();
+    }
     return "deleted";
   } catch (err) {
     if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    if (permanent) console.warn(`[cleanup.permanent_delete] failed resourceType=outlook_mailbox`);
     throw err;
   }
 }

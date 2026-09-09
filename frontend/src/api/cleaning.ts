@@ -222,6 +222,8 @@ export interface CleanupOperationRow {
   requestedBy: { email: string; displayName: string } | null;
   /** A connection's own display_name (e.g. "cloudfuze.co") touched by this operation — not tenants.display_name, which can legitimately differ from what every other screen shows. */
   label: string;
+  /** What this specific operation actually did/does — chosen once at creation (or inherited by retry), never mixed within one operation. */
+  deletionMode: CleanupDeletionMode;
 }
 
 export interface CleanupOperationItemRow {
@@ -262,8 +264,14 @@ export function validateCleanup(manifest: CleanupManifest): Promise<CleanupValid
   return rawFetch(`/api/cleaning/cleanup/validate`, { method: "POST", body: JSON.stringify(manifest) });
 }
 
-export function startCleanup(manifest: CleanupManifest): Promise<{ operationId: string; status: "queued" }> {
-  return rawFetch(`/api/cleaning/cleanup`, { method: "POST", body: JSON.stringify(manifest) });
+export type CleanupDeletionMode = "recycle_bin" | "permanent";
+
+/** deletionMode is a sibling field to the manifest, not part of CleanupManifest's own structure — see routes/cleaning.ts's deletionModeSchema. Omitted/invalid defaults to the safer 'recycle_bin' server-side. */
+export function startCleanup(
+  manifest: CleanupManifest,
+  deletionMode: CleanupDeletionMode
+): Promise<{ operationId: string; status: "queued" }> {
+  return rawFetch(`/api/cleaning/cleanup`, { method: "POST", body: JSON.stringify({ ...manifest, deletionMode }) });
 }
 
 export function getCleanupProgress(operationId: string): Promise<CleanupProgress> {

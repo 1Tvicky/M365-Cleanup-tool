@@ -626,6 +626,15 @@ const cleanupManifestSchema = z.object({
   chats: manifestSlotSchema.optional(),
 });
 
+// A sibling field to the manifest, not part of CleanupManifest's own structure — chosen by the
+// operator on the confirmation screen (components/cleaning/CleanupConfirmation.tsx). Defaults to
+// the safer, recoverable behavior if missing/invalid, per the same "default to the safer behavior
+// when configuration is absent" principle this app already applies elsewhere (e.g. HTTPS
+// enforcement in app.ts) — an operator must explicitly opt into permanent deletion, never the
+// reverse. Only OneDrive/SharePoint/Outlook-mail items ever consult this (graph/cleanupDeletion.ts);
+// Teams/Calendar/Contacts are unaffected either way.
+const deletionModeSchema = z.enum(["recycle_bin", "permanent"]).catch("recycle_bin");
+
 /** `viewer` can validate; only `cleanup_admin` can execute/cancel/retry — mirrors the split routes/cleanup.ts already establishes for the legacy pipeline. */
 async function requireCleanupAdmin(tenantId: string, operatorId: string): Promise<void> {
   const result = await query<{ role: OperatorRole }>(`SELECT role FROM tenant_roles WHERE tenant_id = $1 AND operator_id = $2`, [
@@ -979,6 +988,7 @@ cleaningRouter.post(
   "/cleanup",
   asyncHandler(async (req, res) => {
     const manifest = cleanupManifestSchema.parse(req.body);
+    const deletionMode = deletionModeSchema.parse(req.body?.deletionMode);
     const operatorId = req.session!.operatorId;
     const tenantId = await resolveManifestTenant(manifest, operatorId);
     await requireCleanupAdmin(tenantId, operatorId);
@@ -1017,8 +1027,8 @@ cleaningRouter.post(
 
       const unsupportedCount = freshItems.filter((i) => !i.supported).length;
       const opInsert = await client.query<{ id: string }>(
-        `INSERT INTO cleanup_operations (tenant_id, requested_by, total_items, skipped_items) VALUES ($1, $2, $3, $4) RETURNING id`,
-        [tenantId, operatorId, freshItems.length, unsupportedCount]
+        `INSERT INTO cleanup_operations (tenant_id, requested_by, total_items, skipped_items, deletion_mode) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [tenantId, operatorId, freshItems.length, unsupportedCount, deletionMode]
       );
       const newOperationId = opInsert.rows[0]!.id;
 
@@ -1088,12 +1098,14 @@ interface CleanupOperationSqlRow {
   requested_by_email: string | null;
   requested_by_display_name: string | null;
   label: string | null;
+  deletion_mode: "recycle_bin" | "permanent";
 }
 
 /** Shared by the single-operation getter and the list endpoint — same columns, same joins (operators for "Requested by", one of the operation's own touched connections for a human label). */
 const CLEANUP_OPERATION_SELECT = `
   co.id, co.status, co.total_items, co.processed_items, co.successful_items, co.failed_items, co.skipped_items,
   co.retry_of_operation_id, co.started_at, co.completed_at, co.cancel_requested_at, co.created_at, co.error_message,
+  co.deletion_mode,
   o.email AS requested_by_email, o.display_name AS requested_by_display_name,
   (SELECT c.display_name FROM cleanup_operation_items coi
    JOIN connections c ON c.id = coi.connection_id
@@ -1117,6 +1129,7 @@ function toCleanupOperationRow(r: CleanupOperationSqlRow): CleanupOperationRow {
     errorMessage: r.error_message,
     requestedBy: r.requested_by_email ? { email: r.requested_by_email, displayName: r.requested_by_display_name ?? r.requested_by_email } : null,
     label: r.label ?? "Microsoft 365",
+    deletionMode: r.deletion_mode,
   };
 }
 
@@ -1342,6 +1355,13 @@ cleaningRouter.get(
 
     const progress = await computeCleanupProgress(req.params.operationId!);
 
+    // Whether this specific operation actually performed permanent deletion or an operator-chosen
+    // recycle-bin-recoverable soft delete — a fact tied to which code path ran (see
+    // migrations/013_cleanup_deletion_mode.sql), not something inferred from status/timestamps, so a
+    // "deleted" row from a permanent-mode operation can honestly be reported as "permanently deleted"
+    // without mislabeling an operator's own recycle-bin choice (or an old pre-cutover report).
+    const isPermanent = progress.deletionMode === "permanent";
+
     const result = await query<{
       connection_label: string; resource_name: string; resource_type: CleanupResourceType; file_name: string | null;
       file_size_bytes: string | null; status: string; completed_at: string | null; error_message: string | null;
@@ -1382,12 +1402,15 @@ cleaningRouter.get(
     const rows = result.rows.map((r) => {
       const size = r.file_name != null && r.file_size_bytes != null ? Number(r.file_size_bytes) : null;
       if (size != null && (r.status === "deleted" || r.status === "already_gone")) clearedBytes += size;
+      // Only a genuinely permanent-mode operation's "deleted" rows get the stronger wording — an old
+      // report re-pulled after this shipped must keep saying what actually happened to it back then.
+      const statusText = isPermanent && r.status === "deleted" ? "permanently deleted" : r.status.replace(/_/g, " ");
       return csvLine([
         r.connection_label,
         RESOURCE_TYPE_REPORT_LABEL[r.resource_type],
         r.resource_name,
         r.file_name ?? "",
-        r.status.replace(/_/g, " "),
+        statusText,
         size != null ? formatBytesForReport(size) : "",
         r.completed_at ?? "",
         reportNote(r.status, r.error_message),
@@ -1508,11 +1531,17 @@ cleaningRouter.post(
   asyncHandler(async (req, res) => {
     const { tenantId } = await requireCleanupOperationAccess(req.params.operationId!, req.session!.operatorId, "cleanup_admin");
 
-    const opResult = await query<{ status: CleanupOperationStatus }>(`SELECT status FROM cleanup_operations WHERE id = $1`, [req.params.operationId]);
+    const opResult = await query<{ status: CleanupOperationStatus; deletion_mode: "recycle_bin" | "permanent" }>(
+      `SELECT status, deletion_mode FROM cleanup_operations WHERE id = $1`,
+      [req.params.operationId]
+    );
     const status = opResult.rows[0]?.status;
     if (!status || (status !== "completed_with_errors" && status !== "failed")) {
       throw new ApiError(409, "NOTHING_TO_RETRY", "This cleanup has no failed items to retry");
     }
+    // Retry finishes the same job the same way it was configured — never re-asks, and never
+    // silently changes an operator's earlier recycle-bin choice into a permanent one (or the reverse).
+    const deletionMode = opResult.rows[0]!.deletion_mode;
 
     const running = await query(`SELECT 1 FROM cleanup_operations WHERE tenant_id = $1 AND status IN ('queued', 'running') LIMIT 1`, [tenantId]);
     if (running.rows.length > 0) {
@@ -1530,8 +1559,8 @@ cleaningRouter.post(
 
     const newOperationId = await withTransaction(async (client) => {
       const opInsert = await client.query<{ id: string }>(
-        `INSERT INTO cleanup_operations (tenant_id, requested_by, total_items, retry_of_operation_id) VALUES ($1, $2, $3, $4) RETURNING id`,
-        [tenantId, req.session!.operatorId, failedItems.rows.length, req.params.operationId]
+        `INSERT INTO cleanup_operations (tenant_id, requested_by, total_items, retry_of_operation_id, deletion_mode) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+        [tenantId, req.session!.operatorId, failedItems.rows.length, req.params.operationId, deletionMode]
       );
       const newId = opInsert.rows[0]!.id;
       for (const item of failedItems.rows) {

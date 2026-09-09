@@ -65,7 +65,8 @@ interface PendingItem {
 async function executeItem(
   client: Awaited<ReturnType<typeof graphClientForTenant>>,
   item: PendingItem,
-  operationId: string
+  operationId: string,
+  permanent: boolean
 ): Promise<void> {
   const kind: DriveOwnerKind = item.resource_type === "onedrive_account" ? "user" : "site";
   const ownerId = (item.resource_type === "onedrive_account" ? item.graph_ref.userId : item.graph_ref.siteId)!;
@@ -84,7 +85,7 @@ async function executeItem(
   await query(`UPDATE cleanup_operation_items SET files_total = $2 WHERE id = $1`, [item.id, children.length]);
 
   let firstError: unknown = null;
-  await runThrottled(children, (child) => deleteDriveItem(client, kind, ownerId, child.id), {
+  await runThrottled(children, (child) => deleteDriveItem(client, kind, ownerId, child.id, permanent), {
     isCancelled: () => isCancelled(operationId),
     label: item.resource_type === "onedrive_account" ? "OneDrive" : "SharePoint",
     batchSize: 10,
@@ -113,7 +114,8 @@ async function executeItem(
 async function executeMailboxItem(
   client: Awaited<ReturnType<typeof graphClientForTenant>>,
   item: PendingItem,
-  operationId: string
+  operationId: string,
+  permanent: boolean
 ): Promise<void> {
   const userId = item.graph_ref.userId!;
 
@@ -135,7 +137,7 @@ async function executeMailboxItem(
   await query(`UPDATE cleanup_operation_items SET files_total = $2 WHERE id = $1`, [item.id, messages.length]);
 
   let firstError: unknown = null;
-  await runThrottled(messages, ({ message }) => deleteMessage(client, userId, message.id), {
+  await runThrottled(messages, ({ message }) => deleteMessage(client, userId, message.id, permanent), {
     isCancelled: () => isCancelled(operationId),
     label: "Outlook-Mail",
     batchSize: 10,
@@ -249,12 +251,18 @@ async function executeContactItem(
   if (firstError) throw firstError;
 }
 
-/** Routes a pending item to the execution path for its resource type — executeItem only ever handles onedrive_account/sharepoint_site, so Outlook's three resource kinds each get their own explicit branch here rather than a shared switch-by-parameter helper. */
-function executeAnyItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem, operationId: string): Promise<void> {
-  if (item.resource_type === "outlook_mailbox") return executeMailboxItem(client, item, operationId);
+/**
+ * Routes a pending item to the execution path for its resource type — executeItem only ever handles
+ * onedrive_account/sharepoint_site, so Outlook's three resource kinds each get their own explicit
+ * branch here rather than a shared switch-by-parameter helper. `permanent` is never consulted for
+ * Calendar/Contacts — those two stay on plain soft delete regardless of the operation's
+ * deletion_mode (out of scope for permanent deletion; see graph/cleanupDeletion.ts).
+ */
+function executeAnyItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem, operationId: string, permanent: boolean): Promise<void> {
+  if (item.resource_type === "outlook_mailbox") return executeMailboxItem(client, item, operationId, permanent);
   if (item.resource_type === "outlook_calendar") return executeCalendarItem(client, item, operationId);
   if (item.resource_type === "outlook_contacts") return executeContactItem(client, item, operationId);
-  return executeItem(client, item, operationId);
+  return executeItem(client, item, operationId, permanent);
 }
 
 export const cleanupExecutionWorker = new Worker(
@@ -262,8 +270,8 @@ export const cleanupExecutionWorker = new Worker(
   async (job) => {
     const { operationId } = job.data as { operationId: string };
 
-    const opRow = await query<{ tenant_id: string; m365_tenant_id: string }>(
-      `SELECT co.tenant_id, t.m365_tenant_id
+    const opRow = await query<{ tenant_id: string; m365_tenant_id: string; deletion_mode: "recycle_bin" | "permanent" }>(
+      `SELECT co.tenant_id, t.m365_tenant_id, co.deletion_mode
        FROM cleanup_operations co
        JOIN tenants t ON t.id = co.tenant_id
        WHERE co.id = $1`,
@@ -271,6 +279,7 @@ export const cleanupExecutionWorker = new Worker(
     );
     const info = opRow.rows[0];
     if (!info) throw new Error(`cleanup_operations ${operationId} not found`);
+    const permanent = info.deletion_mode === "permanent";
 
     const pending = await query<PendingItem>(
       `SELECT id, connection_id, resource_type, graph_ref
@@ -292,7 +301,7 @@ export const cleanupExecutionWorker = new Worker(
       let successful = 0;
       let failed = 0;
 
-      await runThrottled(pending.rows, (item) => executeAnyItem(client, item, operationId), {
+      await runThrottled(pending.rows, (item) => executeAnyItem(client, item, operationId, permanent), {
         isCancelled: () => isCancelled(operationId),
         batchSize: 3, // conservative — each item itself fans out into its own (throttled) per-file deletes; tune after the first live test run
         // executeAnyItem is a whole list-everything/seed-DB/delete-everything pipeline per item, not

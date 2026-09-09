@@ -4,6 +4,7 @@ import {
   getCleanupOperationItems,
   getCleanupProgress,
   getCleanupRecentFiles,
+  type CleanupDeletionMode,
   type CleanupItemStatus,
   type CleanupOperationItemRow,
   type CleanupProgress as CleanupProgressData,
@@ -46,7 +47,21 @@ const ITEM_STATUS_STYLE: Record<CleanupOperationItemRow["status"], { label: stri
   failed: { label: "Failed", className: "text-rose-600" },
   skipped: { label: "Skipped", className: "text-slate-500" },
   unsupported: { label: "Not supported", className: "text-amber-600" },
+  // (see itemStatusLabel below — "completed" is overridden to "Permanently Deleted" for the
+  // resource types that actually perform permanent deletion; this base label stays the Calendar/
+  // Contacts-accurate "Removed")
 };
+
+// Only OneDrive/SharePoint/Outlook-mail items ever consult the operation's deletion_mode
+// (graph/cleanupDeletion.ts) — Calendar/Contacts stay on plain soft delete regardless, so a
+// completed Calendar/Contacts item must always read as "Removed," never "Permanently Deleted," even
+// when the operator chose permanent deletion for the rest of the operation.
+const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox"]);
+
+function itemStatusLabel(item: { status: CleanupOperationItemRow["status"]; resourceType: CleanupResourceType }, deletionMode: CleanupDeletionMode): string {
+  if (item.status === "completed" && deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";
+  return ITEM_STATUS_STYLE[item.status].label;
+}
 
 const ITEM_STATUS_FILTERS: { value: CleanupItemStatus | "all"; label: string }[] = [
   { value: "all", label: "All" },
@@ -73,7 +88,17 @@ export interface CategoryTotals {
  * status filter, now with the resourceType filter added alongside it (routes/cleaning.ts). Each
  * item row has its own expand chevron down to level 3 (ItemFilesDrilldown).
  */
-function CategoryItemsList({ operationId, resourceType, isRunning }: { operationId: string; resourceType: CleanupResourceType; isRunning: boolean }) {
+function CategoryItemsList({
+  operationId,
+  resourceType,
+  isRunning,
+  deletionMode,
+}: {
+  operationId: string;
+  resourceType: CleanupResourceType;
+  isRunning: boolean;
+  deletionMode: CleanupDeletionMode;
+}) {
   const [page, setPage] = useState(1);
   const [statusFilter, setStatusFilter] = useState<CleanupItemStatus | "all">("all");
   const [items, setItems] = useState<CleanupOperationItemRow[]>([]);
@@ -157,7 +182,7 @@ function CategoryItemsList({ operationId, resourceType, isRunning }: { operation
                       </span>
                       <span className={`flex items-center gap-1.5 text-xs font-medium ${ITEM_STATUS_STYLE[item.status].className}`}>
                         {(item.status === "pending" || item.status === "processing") && <Spinner />}
-                        {ITEM_STATUS_STYLE[item.status].label}
+                        {itemStatusLabel(item, deletionMode)}
                       </span>
                     </div>
                     {expandedItemId === item.id && (
@@ -172,7 +197,7 @@ function CategoryItemsList({ operationId, resourceType, isRunning }: { operation
                             </span>
                           </div>
                         )}
-                        <ItemFilesDrilldown operationId={operationId} itemId={item.id} />
+                        <ItemFilesDrilldown operationId={operationId} itemId={item.id} resourceType={resourceType} deletionMode={deletionMode} />
                       </>
                     )}
                   </td>
@@ -194,11 +219,12 @@ function CategoryItemsList({ operationId, resourceType, isRunning }: { operation
  * it already has everything it needs (operationId, byType's per-category totals, isRunning) from
  * its own existing per-row poll.
  */
-export function CategoryRow({ operationId, resourceType, v, isRunning }: {
+export function CategoryRow({ operationId, resourceType, v, isRunning, deletionMode }: {
   operationId: string;
   resourceType: CleanupResourceType;
   v: CategoryTotals;
   isRunning: boolean;
+  deletionMode: CleanupDeletionMode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const settled = v.completed + v.failed + v.skipped + v.unsupported;
@@ -229,7 +255,7 @@ export function CategoryRow({ operationId, resourceType, v, isRunning }: {
       </div>
       {expanded && (
         <div id={panelId} className="mb-2 rounded-lg border border-slate-200 bg-white">
-          <CategoryItemsList operationId={operationId} resourceType={resourceType} isRunning={isRunning} />
+          <CategoryItemsList operationId={operationId} resourceType={resourceType} isRunning={isRunning} deletionMode={deletionMode} />
         </div>
       )}
     </div>
@@ -319,7 +345,7 @@ export function CleanupProgressView({ operationId, onFinished }: { operationId: 
           {Object.entries(progress.byType)
             .filter(([, v]) => v.total > 0)
             .map(([type, v]) => (
-              <CategoryRow key={type} operationId={operationId} resourceType={type as CleanupResourceType} v={v} isRunning={isRunning} />
+              <CategoryRow key={type} operationId={operationId} resourceType={type as CleanupResourceType} v={v} isRunning={isRunning} deletionMode={progress.deletionMode} />
             ))}
         </div>
 

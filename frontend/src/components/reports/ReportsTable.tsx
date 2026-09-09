@@ -228,7 +228,7 @@ function OperationRow({
             ) : (
               <div className="px-4 py-2">
                 {categories.map(([type, v]) => (
-                  <CategoryRow key={type} operationId={operation.id} resourceType={type as CleanupResourceType} v={v} isRunning={isRunning} />
+                  <CategoryRow key={type} operationId={operation.id} resourceType={type as CleanupResourceType} v={v} isRunning={isRunning} deletionMode={live.deletionMode} />
                 ))}
               </div>
             )}

@@ -1,5 +1,12 @@
 import { useEffect, useState } from "react";
-import { startCleanup, validateCleanup, type CleanupManifest, type CleanupResourceType, type CleanupValidationResult } from "../../api/cleaning";
+import {
+  startCleanup,
+  validateCleanup,
+  type CleanupDeletionMode,
+  type CleanupManifest,
+  type CleanupResourceType,
+  type CleanupValidationResult,
+} from "../../api/cleaning";
 import { ApiClientError } from "../../api/client";
 
 /** Names the specific cloud(s) actually being cleaned instead of the generic "Microsoft 365 data" — e.g. "OneDrive", or "OneDrive and SharePoint" when both are in the selection. */
@@ -38,6 +45,9 @@ export function CleanupConfirmation({
 }) {
   const [result, setResult] = useState<CleanupValidationResult | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Defaults to the safer, recoverable option — an operator must explicitly opt into permanent
+  // deletion, never the reverse (matches the backend's own default-if-missing behavior).
+  const [deletionMode, setDeletionMode] = useState<CleanupDeletionMode>("recycle_bin");
   const [confirmed, setConfirmed] = useState(false);
   const [starting, setStarting] = useState(false);
   const [startError, setStartError] = useState<string | null>(null);
@@ -48,11 +58,18 @@ export function CleanupConfirmation({
       .catch((err) => setLoadError(err instanceof ApiClientError ? err.message : "Couldn't check your selection. Try again."));
   }, [manifest]);
 
+  // Switching modes mid-review resets the acknowledgement — a "yes I understand" ticked for one
+  // mode must never silently carry over and authorize the other.
+  function handleDeletionModeChange(mode: CleanupDeletionMode) {
+    setDeletionMode(mode);
+    setConfirmed(false);
+  }
+
   async function handleStart() {
     setStarting(true);
     setStartError(null);
     try {
-      const { operationId } = await startCleanup(manifest);
+      const { operationId } = await startCleanup(manifest, deletionMode);
       onStarted(operationId);
     } catch (err) {
       setStartError(err instanceof ApiClientError ? err.message : "Couldn't start cleanup. Try again.");
@@ -66,7 +83,9 @@ export function CleanupConfirmation({
   return (
     <div className="mx-auto max-w-2xl px-8 py-10">
       <h2 className="mb-1 text-lg font-semibold text-slate-800">Ready to clean up</h2>
-      <p className="mb-6 text-sm text-slate-500">This will permanently remove the selected {result ? selectedCloudNames(result.summary) : "Microsoft 365"} data.</p>
+      <p className="mb-6 text-sm text-slate-500">
+        Choose how the selected {result ? selectedCloudNames(result.summary) : "Microsoft 365"} data should be removed.
+      </p>
 
       {loadError ? (
         <p className="rounded-lg border border-dashed border-rose-300 px-4 py-4 text-center text-sm text-rose-600">{loadError}</p>
@@ -127,13 +146,47 @@ export function CleanupConfirmation({
 
           {executableCount > 0 && (
             <>
-              <p className="mt-6 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
-                This action will remove the selected {selectedCloudNames(result.summary)} data. Make sure you have reviewed your selection before continuing.
+              <fieldset className="mt-6 rounded-xl border border-slate-200 bg-white p-4">
+                <legend className="px-1 text-sm font-semibold text-slate-700">How should this data be removed?</legend>
+                <label className="mt-2 flex items-start gap-2 text-sm text-slate-700">
+                  <input
+                    type="radio"
+                    name="deletionMode"
+                    className="mt-0.5"
+                    checked={deletionMode === "recycle_bin"}
+                    onChange={() => handleDeletionModeChange("recycle_bin")}
+                  />
+                  <span>
+                    <span className="font-medium">Move to recycle bin</span> — recoverable from the recycle bin / Deleted Items for a limited time.
+                  </span>
+                </label>
+                <label className="mt-3 flex items-start gap-2 text-sm text-slate-700">
+                  <input
+                    type="radio"
+                    name="deletionMode"
+                    className="mt-0.5"
+                    checked={deletionMode === "permanent"}
+                    onChange={() => handleDeletionModeChange("permanent")}
+                  />
+                  <span>
+                    <span className="font-medium">Permanently delete</span> — removed from the recycle bin / Deleted Items immediately. This cannot
+                    be undone.
+                  </span>
+                </label>
+              </fieldset>
+
+              <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {deletionMode === "permanent"
+                  ? `The selected ${selectedCloudNames(result.summary)} data will be permanently deleted — removed from the recycle bin / Deleted Items immediately, not just moved there. This covers everything currently in the selected resources when the job runs, not only what's listed above. This action cannot be undone.`
+                  : `The selected ${selectedCloudNames(result.summary)} data will be moved to the recycle bin / Deleted Items. This covers everything currently in the selected resources when the job runs, not only what's listed above.`}{" "}
+                Make sure you have reviewed your selection before continuing.
               </p>
 
               <label className="mt-4 flex items-start gap-2 text-sm text-slate-700">
                 <input type="checkbox" className="mt-0.5" checked={confirmed} onChange={(e) => setConfirmed(e.target.checked)} />
-                I understand that this cleanup will remove the selected data.
+                {deletionMode === "permanent"
+                  ? "I understand that this cleanup will permanently remove the selected data and cannot be undone."
+                  : "I understand that this cleanup will remove the selected data."}
               </label>
 
               {startError && <p className="mt-3 text-sm text-rose-600">{startError}</p>}

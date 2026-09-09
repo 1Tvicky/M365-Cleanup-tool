@@ -1,17 +1,27 @@
 import { useEffect, useState } from "react";
-import { getCleanupOperationItemFiles, type CleanupItemFileRow } from "../../api/cleaning";
+import { getCleanupOperationItemFiles, type CleanupDeletionMode, type CleanupItemFileRow, type CleanupResourceType } from "../../api/cleaning";
 import { ApiClientError } from "../../api/client";
 import { formatBytes, formatDate } from "../../utils/format";
 import { PageFooter } from "./DiscoveryTable";
 
 const PAGE_SIZE = 20;
 
-const STATUS_STYLE: Record<CleanupItemFileRow["status"], { label: string; className: string }> = {
+// Only OneDrive/SharePoint/Outlook-mail items perform real permanent deletion
+// (graph/cleanupDeletion.ts) — Calendar/Contacts stay on plain soft delete regardless of the
+// operation's deletion_mode, so a 'deleted' file row for those must keep reading as "Removed."
+const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox"]);
+
+const BASE_STATUS_STYLE: Record<CleanupItemFileRow["status"], { label: string; className: string }> = {
   pending: { label: "Pending", className: "text-slate-400" },
   deleted: { label: "Removed", className: "text-emerald-600" },
   already_gone: { label: "Already gone", className: "text-slate-500" },
   failed: { label: "Failed", className: "text-rose-500" },
 };
+
+function fileStatusLabel(status: CleanupItemFileRow["status"], resourceType: CleanupResourceType, deletionMode: CleanupDeletionMode): string {
+  if (status === "deleted" && deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(resourceType)) return "Permanently Deleted";
+  return BASE_STATUS_STYLE[status].label;
+}
 
 /** A small spinning ring — Tailwind's animate-spin on a two-tone border circle, no custom keyframes. */
 export function Spinner({ className = "h-3.5 w-3.5" }: { className?: string }) {
@@ -25,7 +35,17 @@ export function Spinner({ className = "h-3.5 w-3.5" }: { className?: string }) {
  * component doesn't poll on its own — the parent view re-mounts/refetches it on its own poll cycle
  * while a cleanup is running, same as everything else on that page.
  */
-export function ItemFilesDrilldown({ operationId, itemId }: { operationId: string; itemId: string }) {
+export function ItemFilesDrilldown({
+  operationId,
+  itemId,
+  resourceType,
+  deletionMode,
+}: {
+  operationId: string;
+  itemId: string;
+  resourceType: CleanupResourceType;
+  deletionMode: CleanupDeletionMode;
+}) {
   const [page, setPage] = useState(1);
   const [files, setFiles] = useState<CleanupItemFileRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -81,10 +101,10 @@ export function ItemFilesDrilldown({ operationId, itemId }: { operationId: strin
                     {f.fileName}
                     {f.errorMessage && <div className="text-xs text-rose-500">{f.errorMessage}</div>}
                   </td>
-                  <td className={`px-4 py-2 font-medium ${STATUS_STYLE[f.status].className}`}>
+                  <td className={`px-4 py-2 font-medium ${BASE_STATUS_STYLE[f.status].className}`}>
                     <span className="inline-flex items-center gap-1.5">
                       {f.status === "pending" && <Spinner />}
-                      {STATUS_STYLE[f.status].label}
+                      {fileStatusLabel(f.status, resourceType, deletionMode)}
                     </span>
                   </td>
                   <td className="px-4 py-2 text-right text-slate-500">{f.fileSizeBytes > 0 ? formatBytes(f.fileSizeBytes) : "—"}</td>

@@ -4,6 +4,7 @@ import {
   getCleanupOperationItems,
   getCleanupProgress,
   retryCleanup,
+  type CleanupDeletionMode,
   type CleanupItemStatus,
   type CleanupOperationItemRow,
   type CleanupProgress,
@@ -32,6 +33,17 @@ const STATUS_STYLE: Record<CleanupItemStatus, { label: string; className: string
   skipped: { label: "Skipped", className: "text-slate-500" },
   unsupported: { label: "Not supported", className: "text-amber-600" },
 };
+
+// Only OneDrive/SharePoint/Outlook-mail items perform real permanent deletion
+// (graph/cleanupDeletion.ts) — Calendar/Contacts stay on plain soft delete, so a completed Calendar
+// or Contacts item must keep reading as "Removed," never "Permanently Deleted," regardless of the
+// operation's deletion_mode.
+const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox"]);
+
+function itemStatusLabel(item: { status: CleanupItemStatus; resourceType: CleanupResourceType }, deletionMode: CleanupDeletionMode): string {
+  if (item.status === "completed" && deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";
+  return STATUS_STYLE[item.status].label;
+}
 
 const FILTERS: { value: CleanupItemStatus | "all"; label: string }[] = [
   { value: "all", label: "All" },
@@ -203,13 +215,20 @@ export function CleanupResultsView({ operationId, onDone, onRetried }: { operati
                           {friendlyError(item) && <div className="text-xs text-rose-500">{friendlyError(item)}</div>}
                         </td>
                         <td className="px-4 py-3 text-slate-500">{RESOURCE_LABEL[item.resourceType]}</td>
-                        <td className={`px-4 py-3 font-medium ${STATUS_STYLE[item.status].className}`}>{STATUS_STYLE[item.status].label}</td>
+                        <td className={`px-4 py-3 font-medium ${STATUS_STYLE[item.status].className}`}>
+                          {itemStatusLabel(item, summary?.deletionMode ?? "recycle_bin")}
+                        </td>
                         <td className="px-4 py-3 text-slate-500">{formatDate(item.completedAt)}</td>
                       </tr>
                       {expandedItemId === item.id && (
                         <tr>
                           <td colSpan={5} className="p-0">
-                            <ItemFilesDrilldown operationId={operationId} itemId={item.id} />
+                            <ItemFilesDrilldown
+                              operationId={operationId}
+                              itemId={item.id}
+                              resourceType={item.resourceType}
+                              deletionMode={summary?.deletionMode ?? "recycle_bin"}
+                            />
                           </td>
                         </tr>
                       )}

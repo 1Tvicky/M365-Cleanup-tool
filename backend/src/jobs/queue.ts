@@ -56,10 +56,22 @@ export interface CleanupExecutionJobPayload {
   operationId: string; // cleanup_operations.id — worker looks up tenant/items from Postgres by this id
 }
 
+// Cleanup now performs permanent (unrecoverable) deletion — see graph/cleanupDeletion.ts — which
+// removes the recycle bin's implicit "mistake survived the confirm-to-execute gap" safety net: a
+// job can otherwise be picked up by an idle worker (concurrency 3) essentially immediately, and
+// cancellation is only checked between batches, so a small operation could fully complete before an
+// operator notices a mistake and hits Cancel. This delay gives Cancel — POST /cleanup/:id/cancel,
+// already reachable the instant an operation is 'queued' — a real window: the worker's own
+// isCancelled() check runs before the very first batch, so a cancellation requested during this
+// delay is caught before any Graph call is ever made. Applies to both call sites (initial start and
+// retry) since both route through this one function.
+const CLEANUP_EXECUTION_GRACE_PERIOD_MS = 30_000;
+
 export async function enqueueCleanupExecutionJob(payload: CleanupExecutionJobPayload): Promise<void> {
   await cleanupExecutionQueue.add("run-cleanup-execution", payload, {
     attempts: 1,
     removeOnComplete: { age: 60 * 60 * 24 * 30 },
     removeOnFail: false,
+    delay: CLEANUP_EXECUTION_GRACE_PERIOD_MS,
   });
 }

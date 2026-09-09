@@ -83,6 +83,8 @@ export type CleanupResourceType =
   | "chat";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
+/** Chosen by the operator on the confirmation screen — see migrations/013_cleanup_deletion_mode.sql. Only OneDrive/SharePoint/Outlook-mail items ever consult this; Teams/Calendar/Contacts are unaffected either way. */
+export type CleanupDeletionMode = "recycle_bin" | "permanent";
 
 /** One slot per resource family; `ids` reference the same internal row ids already used by the existing selection state (connection_users.id / connection_outlook_calendars.id / connection_outlook_contacts.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
 export interface CleanupManifest {
@@ -139,6 +141,8 @@ export interface CleanupOperationRow {
   requestedBy: { email: string; displayName: string } | null;
   /** A connection's own display_name (e.g. "cloudfuze.co") touched by this operation — deliberately not tenants.display_name, which can legitimately differ from what every other screen shows the user. */
   label: string;
+  /** What this specific operation actually did/does — chosen once at creation (or inherited by retry), never mixed within one operation. */
+  deletionMode: CleanupDeletionMode;
 }
 
 export interface CleanupOperationItemRow {
