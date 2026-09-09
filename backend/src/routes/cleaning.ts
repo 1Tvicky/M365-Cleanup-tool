@@ -276,6 +276,16 @@ cleaningRouter.get(
   })
 );
 
+/** GET /api/cleaning/connections/:id/google-my-drive — Google My Drive Accounts table. Identical shape to /onedrive above — listCleaningResources already reads generic connection_users columns, no Google-specific query needed. */
+cleaningRouter.get(
+  "/connections/:id/google-my-drive",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "google_my_drive");
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, "google_my_drive_account", parsePageQuery(req));
+    res.json({ accounts: rows, total, page, pageSize });
+  })
+);
+
 /**
  * Reads connection_outlook_calendars — its own dedicated query, not a reuse/generalization of
  * listCleaningResources (which is hardcoded to connection_users), per the no-shared-Outlook-helper
@@ -728,6 +738,7 @@ async function resolveManifestTenant(manifest: CleanupManifest, operatorId: stri
         manifest.outlookContacts?.connectionId,
         manifest.channels?.connectionId,
         manifest.chats?.connectionId,
+        manifest.googleMyDrive?.connectionId,
       ].filter((id): id is string => Boolean(id))
     ),
   ];
@@ -738,7 +749,10 @@ async function resolveManifestTenant(manifest: CleanupManifest, operatorId: stri
   const results = await Promise.all(connectionIds.map((id) => requireConnectionAccess(id, operatorId)));
   const tenantIds = new Set(results.map((r) => r.tenantId));
   if (tenantIds.size > 1) {
-    throw new ApiError(400, "TENANT_MISMATCH", "Selected items belong to more than one Microsoft 365 tenant");
+    // Every tenants row is exactly one directory of exactly one vendor (M365 xor Google — see
+    // migrations/014_google_my_drive.sql) — this also naturally rejects a manifest that mixes an
+    // M365 connection with a Google connection, not just two different M365 tenants.
+    throw new ApiError(400, "TENANT_MISMATCH", "Selected items belong to more than one tenant");
   }
   return results[0]!.tenantId;
 }
@@ -782,6 +796,7 @@ async function resolveManifestItems(
     outlookContacts: [],
     channels: [],
     chats: [],
+    googleMyDrive: [],
   };
 
   if (manifest.oneDrive) {
@@ -966,6 +981,34 @@ async function resolveManifestItems(
     }
   }
 
+  // Google My Drive — copy-shaped from the manifest.oneDrive block above; graphRef is keyed
+  // userEmail (not userId) since domain-wide-delegation impersonation needs an email subject, not
+  // Google's opaque Directory user id.
+  if (manifest.googleMyDrive) {
+    await requireConnectionAccess(manifest.googleMyDrive.connectionId, operatorId, "google_my_drive");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string }>(
+      `SELECT id, display_name, upn FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.googleMyDrive.connectionId, manifest.googleMyDrive.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.googleMyDrive.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Google My Drive account is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.googleMyDrive.connectionId,
+        resourceType: "google_my_drive_account",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        graphRef: { userEmail: row.upn },
+        supported: true,
+      });
+      foundIds.googleMyDrive.push(row.id);
+    }
+  }
+
   return { items, errors, foundIds };
 }
 
@@ -976,6 +1019,7 @@ function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult[
     outlookMailboxes: items.filter((i) => i.resourceType === "outlook_mailbox").length,
     outlookCalendars: items.filter((i) => i.resourceType === "outlook_calendar").length,
     outlookContacts: items.filter((i) => i.resourceType === "outlook_contacts").length,
+    googleMyDriveAccounts: items.filter((i) => i.resourceType === "google_my_drive_account").length,
     channels: items.filter((i) => i.resourceType === "channel").length,
     chats: items.filter((i) => i.resourceType === "chat").length,
   };
@@ -1221,6 +1265,7 @@ const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message",
+  google_my_drive_account: "Google My Drive account",
 };
 
 /** Matches an operation whose touched connections include one with a matching display_name — used by both the list and its count query, so the two never disagree on what "matches" means. */

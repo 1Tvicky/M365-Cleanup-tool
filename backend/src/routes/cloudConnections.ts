@@ -10,6 +10,8 @@ import { consumeConnectAttempt, InvalidOAuthStateError, startConnectAttempt } fr
 import { encryptToken } from "../services/tokenEncryption.js";
 import { enqueueCloudSyncJob } from "../jobs/queue.js";
 import { getSiteById, getTeamById, getUserById, listAllTeams, listAllUsers, searchSites } from "../graph/cloudEnumeration.js";
+import { getDirectoryClientAs } from "../services/googleWorkspaceAuth.js";
+import { getGoogleUserById, listDomainUsers } from "../graph/googleDriveEnumeration.js";
 import { ApiError } from "../types/index.js";
 import {
   CLOUD_TYPES,
@@ -29,9 +31,12 @@ cloudConnectionsRouter.use(requireSession);
  * the rest of the app uses (middleware/rbac.ts), applied here since connections aren't addressed
  * by :tenantId in the URL the way cleanup routes are.
  */
-async function requireConnectionAccess(connectionId: string, operatorId: string): Promise<{ tenantId: string; cloudType: CloudType; m365TenantId: string }> {
-  const result = await query<{ tenant_id: string; cloud_type: CloudType; m365_tenant_id: string; has_access: boolean }>(
-    `SELECT c.tenant_id, c.cloud_type, t.m365_tenant_id, (tr.operator_id IS NOT NULL) AS has_access
+async function requireConnectionAccess(
+  connectionId: string,
+  operatorId: string
+): Promise<{ tenantId: string; cloudType: CloudType; m365TenantId: string | null; adminUpn: string }> {
+  const result = await query<{ tenant_id: string; cloud_type: CloudType; m365_tenant_id: string | null; admin_upn: string; has_access: boolean }>(
+    `SELECT c.tenant_id, c.cloud_type, t.m365_tenant_id, c.admin_upn, (tr.operator_id IS NOT NULL) AS has_access
      FROM connections c
      JOIN tenants t ON t.id = c.tenant_id
      LEFT JOIN tenant_roles tr ON tr.tenant_id = c.tenant_id AND tr.operator_id = $2
@@ -40,21 +45,40 @@ async function requireConnectionAccess(connectionId: string, operatorId: string)
   );
   const row = result.rows[0];
   if (!row || !row.has_access) throw new ApiError(404, "CONNECTION_NOT_FOUND", "No such connection");
-  return { tenantId: row.tenant_id, cloudType: row.cloud_type, m365TenantId: row.m365_tenant_id };
+  return { tenantId: row.tenant_id, cloudType: row.cloud_type, m365TenantId: row.m365_tenant_id, adminUpn: row.admin_upn };
 }
 
 /**
- * The cheap, listing-only Graph call for a workload's browsable resources — never the expensive
- * per-resource sync calls (getUserDriveQuota/getSiteDriveQuota/etc). cloudType is always the
- * connection's own DB column (via requireConnectionAccess), never taken from the request, so this
- * can't be pointed at the wrong Graph endpoint by a client.
+ * Everything needed to build whichever provider's client this connection actually needs —
+ * m365TenantId for Graph's app-only client-credentials path, adminUpn as the domain-wide-delegation
+ * impersonation subject for Google's path. Exactly one of these is actually used per call, decided
+ * by cloudType (never client input) — see cloudProvider() in types/connections.ts.
  */
-async function listWorkloadResources(client: Awaited<ReturnType<typeof graphClientForTenant>>, cloudType: CloudType): Promise<AvailableResourceRow[]> {
-  if (cloudType === "sharepoint") {
+interface WorkloadIdentity {
+  cloudType: CloudType;
+  m365TenantId: string | null;
+  adminUpn: string;
+}
+
+/**
+ * The cheap, listing-only call for a workload's browsable resources — never the expensive
+ * per-resource sync calls (getUserDriveQuota/getUserDriveUsage/etc). cloudType is always the
+ * connection's own DB column (via requireConnectionAccess), never taken from the request, so this
+ * can't be pointed at the wrong endpoint by a client.
+ */
+async function listWorkloadResources(identity: WorkloadIdentity): Promise<AvailableResourceRow[]> {
+  if (identity.cloudType === "google_my_drive") {
+    const directory = await getDirectoryClientAs(identity.adminUpn);
+    const domain = identity.adminUpn.split("@")[1]!;
+    const users = await listDomainUsers(directory, domain);
+    return users.map((u) => ({ id: u.id, displayName: u.displayName ?? u.email, secondary: u.email }));
+  }
+  const client = await graphClientForTenant(identity.m365TenantId!);
+  if (identity.cloudType === "sharepoint") {
     const sites = await searchSites(client);
     return sites.map((s) => ({ id: s.id, displayName: s.displayName, secondary: s.webUrl }));
   }
-  if (cloudType === "teams") {
+  if (identity.cloudType === "teams") {
     const teams = await listAllTeams(client);
     return teams.map((t) => ({ id: t.id, displayName: t.displayName }));
   }
@@ -65,20 +89,22 @@ async function listWorkloadResources(client: Awaited<ReturnType<typeof graphClie
 /**
  * Direct single-resource lookup, dispatched by the connection's own cloud_type (never the
  * request's) — used to validate/re-derive a *specific selected* resource without ever paginating
- * the whole tenant. This is what lets POST /:id/resync confirm a handful of selected ids belong to
- * this workload without the "enumerate everything, then filter" pattern the resource-level sync
- * feature exists to eliminate.
+ * the whole tenant/domain. This is what lets POST /:id/resync confirm a handful of selected ids
+ * belong to this workload without the "enumerate everything, then filter" pattern the
+ * resource-level sync feature exists to eliminate.
  */
-async function getWorkloadResourceById(
-  client: Awaited<ReturnType<typeof graphClientForTenant>>,
-  cloudType: CloudType,
-  id: string
-): Promise<AvailableResourceRow | null> {
-  if (cloudType === "sharepoint") {
+async function getWorkloadResourceById(identity: WorkloadIdentity, id: string): Promise<AvailableResourceRow | null> {
+  if (identity.cloudType === "google_my_drive") {
+    const directory = await getDirectoryClientAs(identity.adminUpn);
+    const user = await getGoogleUserById(directory, id);
+    return user ? { id: user.id, displayName: user.displayName ?? user.email, secondary: user.email } : null;
+  }
+  const client = await graphClientForTenant(identity.m365TenantId!);
+  if (identity.cloudType === "sharepoint") {
     const site = await getSiteById(client, id);
     return site ? { id: site.id, displayName: site.displayName, secondary: site.webUrl } : null;
   }
-  if (cloudType === "teams") {
+  if (identity.cloudType === "teams") {
     const team = await getTeamById(client, id);
     return team ? { id: team.id, displayName: team.displayName } : null;
   }
@@ -97,14 +123,10 @@ async function getWorkloadResourceById(
 const availableResourcesCache = new Map<string, { resources: AvailableResourceRow[]; expiresAt: number }>();
 const AVAILABLE_RESOURCES_TTL_MS = 90_000;
 
-async function getCachedWorkloadResources(
-  connectionId: string,
-  client: Awaited<ReturnType<typeof graphClientForTenant>>,
-  cloudType: CloudType
-): Promise<AvailableResourceRow[]> {
+async function getCachedWorkloadResources(connectionId: string, identity: WorkloadIdentity): Promise<AvailableResourceRow[]> {
   const cached = availableResourcesCache.get(connectionId);
   if (cached && cached.expiresAt > Date.now()) return cached.resources;
-  const resources = await listWorkloadResources(client, cloudType);
+  const resources = await listWorkloadResources(identity);
   availableResourcesCache.set(connectionId, { resources, expiresAt: Date.now() + AVAILABLE_RESOURCES_TTL_MS });
   return resources;
 }
@@ -284,10 +306,8 @@ cloudConnectionsRouter.get(
 cloudConnectionsRouter.get(
   "/:id/available-resources",
   asyncHandler(async (req, res) => {
-    const { cloudType, m365TenantId } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
-
-    const client = await graphClientForTenant(m365TenantId);
-    const all = await getCachedWorkloadResources(req.params.id!, client, cloudType);
+    const identity = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const all = await getCachedWorkloadResources(req.params.id!, identity);
 
     const search = typeof req.query.search === "string" ? req.query.search.trim().toLowerCase() : "";
     const filtered = search
@@ -460,7 +480,8 @@ cloudConnectionsRouter.post(
   "/:id/resync",
   requireInternalAdmin,
   asyncHandler(async (req, res) => {
-    const { tenantId, cloudType, m365TenantId } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const identity = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const { tenantId, cloudType } = identity;
     const requestedIds: string[] = Array.isArray(req.body?.resourceIds) ? req.body.resourceIds.filter((v: unknown) => typeof v === "string") : [];
 
     const connRow = await query<{ status: string }>(`SELECT status FROM connections WHERE id = $1`, [req.params.id]);
@@ -498,15 +519,14 @@ cloudConnectionsRouter.post(
       );
       const lockedIds = new Set(alreadySyncing.rows.map((r) => r.graph_resource_id));
 
-      // Direct per-id lookups, not a full tenant listing — a tenant with thousands of users
-      // selecting 3 must only ever cost 3 Graph calls here, never one that pages the whole tenant.
-      const client = await graphClientForTenant(m365TenantId);
+      // Direct per-id lookups, not a full tenant/domain listing — a tenant with thousands of
+      // users selecting 3 must only ever cost 3 calls here, never one that pages everything.
       for (const id of requestedIds) {
         if (lockedIds.has(id)) {
           skipped.push({ id, reason: "already_syncing" });
           continue;
         }
-        const resource = await getWorkloadResourceById(client, cloudType, id);
+        const resource = await getWorkloadResourceById(identity, id);
         if (resource) {
           acceptedResources.push(resource);
         } else {
@@ -611,11 +631,15 @@ m365ConnectCallbackRouter.use((_req, res, next) => {
   next();
 });
 
+// Only ever rendered by the M365 popup HTML below — google_my_drive never reaches this popup flow
+// (see routes/googleConnections.ts's connect/verify route, no redirect/callback involved), but the
+// entry is still required so this stays a total Record<CloudType, string>.
 const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
   onedrive: "OneDrive for Business",
   sharepoint: "SharePoint Online",
   teams: "Microsoft Teams",
   outlook: "Outlook",
+  google_my_drive: "Google My Drive",
 };
 
 /**

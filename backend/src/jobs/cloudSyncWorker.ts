@@ -18,6 +18,7 @@ import {
 import { runThrottled } from "../services/rateLimiter.js";
 import type { CloudType } from "../types/connections.js";
 import { connection as redis } from "./queue.js";
+import { isGoogleReauthError, listAllGoogleDomainUsers, syncGoogleMyDrive } from "./googleDriveSync.js";
 
 /**
  * Maps a resource's own Graph id (user id / site id / team id) to its sync_job_resources.id, for a
@@ -25,16 +26,16 @@ import { connection as redis } from "./queue.js";
  * or this sync_jobs row predates this feature) — every sync* function below skips all
  * sync_job_resources bookkeeping in that case and behaves exactly as it always has.
  */
-type ResourceRowMap = Map<string, string> | null;
+export type ResourceRowMap = Map<string, string> | null;
 
-/** Bulk-marks every selected resource 'processing' right before its pass starts — batched per pass rather than per individual Graph call (which run concurrently within a batch anyway, see rateLimiter.ts), so this doesn't need to reach into runThrottled's per-item timing. */
-async function markProcessing(resourceRows: ResourceRowMap): Promise<void> {
+/** Bulk-marks every selected resource 'processing' right before its pass starts — batched per pass rather than per individual Graph call (which run concurrently within a batch anyway, see rateLimiter.ts), so this doesn't need to reach into runThrottled's per-item timing. Exported for jobs/googleDriveSync.ts, which mirrors this same resource-scoped-sync bookkeeping. */
+export async function markProcessing(resourceRows: ResourceRowMap): Promise<void> {
   if (!resourceRows || resourceRows.size === 0) return;
   await query(`UPDATE sync_job_resources SET status = 'processing', started_at = now() WHERE id = ANY($1::uuid[])`, [[...resourceRows.values()]]);
 }
 
-/** Records one resource's outcome for a resource-scoped run — a no-op for a legacy/tenant-wide run (resourceRows is null) or a resource id with no matching row (shouldn't happen — every id here came from the same requested set the rows were seeded from). */
-async function settleResource(resourceRows: ResourceRowMap, graphResourceId: string, ok: boolean, errorMessage: string | null): Promise<void> {
+/** Records one resource's outcome for a resource-scoped run — a no-op for a legacy/tenant-wide run (resourceRows is null) or a resource id with no matching row (shouldn't happen — every id here came from the same requested set the rows were seeded from). Exported — see markProcessing. */
+export async function settleResource(resourceRows: ResourceRowMap, graphResourceId: string, ok: boolean, errorMessage: string | null): Promise<void> {
   const rowId = resourceRows?.get(graphResourceId);
   if (!rowId) return;
   await query(`UPDATE sync_job_resources SET status = $2, error_message = $3, completed_at = now(), updated_at = now() WHERE id = $1`, [
@@ -53,7 +54,7 @@ async function cancelRemainingResources(syncJobId: string): Promise<void> {
   );
 }
 
-interface ConnectionUserUpsert {
+export interface ConnectionUserUpsert {
   graphUserId: string;
   upn: string;
   displayName: string | null;
@@ -71,14 +72,14 @@ interface ConnectionUserUpsert {
  * tenant) would linger forever, permanently inflating "not added" counts beyond the current
  * sync_jobs.total_users.
  */
-async function pruneStaleConnectionUsers(connectionId: string, currentIds: string[]): Promise<void> {
+export async function pruneStaleConnectionUsers(connectionId: string, currentIds: string[]): Promise<void> {
   await query(`DELETE FROM connection_users WHERE connection_id = $1 AND NOT (graph_user_id = ANY($2::text[]))`, [
     connectionId,
     currentIds,
   ]);
 }
 
-async function upsertConnectionUser(connectionId: string, row: ConnectionUserUpsert): Promise<void> {
+export async function upsertConnectionUser(connectionId: string, row: ConnectionUserUpsert): Promise<void> {
   await query(
     `INSERT INTO connection_users
        (connection_id, graph_user_id, upn, display_name, storage_used_bytes, item_count, sync_status, error_message, last_synced_at)
@@ -150,7 +151,7 @@ async function upsertOutlookContact(connectionId: string, row: ConnectionUserUps
   );
 }
 
-async function logConnectionEvent(
+export async function logConnectionEvent(
   event: string,
   connectionId: string,
   tenantId: string,
@@ -169,7 +170,7 @@ function isReauthError(err: unknown): boolean {
   return status === 401 || /InvalidAuthenticationToken|consent_required|invalid_grant|AuthenticationError/i.test(code);
 }
 
-async function isCancelled(syncJobId: string): Promise<boolean> {
+export async function isCancelled(syncJobId: string): Promise<boolean> {
   const result = await query<{ cancel_requested_at: string | null }>(
     `SELECT cancel_requested_at FROM sync_jobs WHERE id = $1`,
     [syncJobId]
@@ -492,9 +493,10 @@ export const cloudSyncWorker = new Worker(
       connection_id: string;
       tenant_id: string;
       cloud_type: CloudType;
-      m365_tenant_id: string;
+      m365_tenant_id: string | null;
+      admin_upn: string;
     }>(
-      `SELECT c.id AS connection_id, c.tenant_id, c.cloud_type, t.m365_tenant_id
+      `SELECT c.id AS connection_id, c.tenant_id, c.cloud_type, t.m365_tenant_id, c.admin_upn
        FROM sync_jobs sj
        JOIN connections c ON c.id = sj.connection_id
        JOIN tenants t ON t.id = c.tenant_id
@@ -525,8 +527,39 @@ export const cloudSyncWorker = new Worker(
     const isScoped = selectedResources.rows.length > 0;
 
     try {
-      const client = await graphClientForTenant(info.m365_tenant_id);
       let failed = 0;
+
+      if (info.cloud_type === "google_my_drive") {
+        // Google's per-item impersonated-client model (built inside syncGoogleMyDrive's own
+        // runThrottled callback) means there's no single shared client to build here, unlike every
+        // M365 branch below.
+        if (isScoped) {
+          const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+          await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+          const users = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, email: r.secondary ?? "", displayName: r.display_name }));
+          failed = await syncGoogleMyDrive(info.connection_id, syncJobId, users, resourceRows);
+        } else {
+          const users = await listAllGoogleDomainUsers(info.admin_upn);
+          await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
+          await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
+          failed = await syncGoogleMyDrive(info.connection_id, syncJobId, users, null);
+        }
+
+        const cancelled = await isCancelled(syncJobId);
+        const finalStatus = cancelled ? "cancelled" : failed > 0 ? "completed_with_errors" : "completed";
+        if (cancelled) await cancelRemainingResources(syncJobId);
+        await query(`UPDATE sync_jobs SET status = $2, finished_at = now() WHERE id = $1`, [syncJobId, finalStatus]);
+        if (!cancelled) {
+          await query(
+            `UPDATE connections SET last_synced_at = now(), status = CASE WHEN status IN ('connecting', 'error') THEN 'active' ELSE status END, last_error = NULL WHERE id = $1`,
+            [info.connection_id]
+          );
+        }
+        await logConnectionEvent("job_finished", info.connection_id, info.tenant_id, { syncJobId, status: finalStatus, failed });
+        return;
+      }
+
+      const client = await graphClientForTenant(info.m365_tenant_id!);
 
       if (isScoped) {
         // Never re-enumerates the tenant — the selected resources' identifying fields were already
@@ -581,9 +614,10 @@ export const cloudSyncWorker = new Worker(
       }
       await logConnectionEvent("job_finished", info.connection_id, info.tenant_id, { syncJobId, status: finalStatus, failed });
     } catch (err) {
-      // A tenant-wide auth failure (revoked consent, expired app-only grant) is a distinct
-      // connection state, not a stalled progress bar — requirement #5 of the connections spec.
-      if (isReauthError(err)) {
+      // A tenant-wide auth failure (revoked consent, expired app-only grant / revoked domain-wide
+      // delegation) is a distinct connection state, not a stalled progress bar — requirement #5 of
+      // the connections spec. Google's error shape differs from Graph's, hence the separate check.
+      if (info.cloud_type === "google_my_drive" ? isGoogleReauthError(err) : isReauthError(err)) {
         await query(
           `UPDATE connections SET status = 'needs_reauth', last_error = $2 WHERE id = $1`,
           [info.connection_id, String(err)]

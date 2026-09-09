@@ -13,7 +13,7 @@ import {
 import { ApiClientError } from "../../api/client";
 import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../cleaning/DiscoveryTable";
 import { Spinner } from "../cleaning/ItemFilesDrilldown";
-import { OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
+import { GoogleIcon, OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 import type { Workload } from "../../types";
 import { formatBytes } from "../../utils/format";
 
@@ -24,6 +24,7 @@ const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = 
   sharepoint: SharePointIcon,
   teams: TeamsIcon,
   outlook: OutlookIcon,
+  google_my_drive: GoogleIcon,
 };
 
 const CLOUD_LABELS: Record<Workload, string> = {
@@ -31,6 +32,7 @@ const CLOUD_LABELS: Record<Workload, string> = {
   sharepoint: "SharePoint Online",
   teams: "Microsoft Teams",
   outlook: "Outlook",
+  google_my_drive: "Google My Drive",
 };
 
 // SharePoint enumerates sites, not people — a tenant with a hundred users can easily have a
@@ -43,6 +45,7 @@ const UNIT_LABELS: Record<Workload, { singular: string; plural: string }> = {
   teams: { singular: "Team", plural: "Teams" },
   sharepoint: { singular: "Site", plural: "Sites" },
   outlook: { singular: "Mailbox", plural: "Mailboxes" },
+  google_my_drive: { singular: "User", plural: "Users" },
 };
 
 // The secondary identifier shown alongside a resource's name in the Sync Resources picker — null
@@ -52,6 +55,7 @@ const SECONDARY_COLUMN_LABEL: Record<Workload, string | null> = {
   outlook: "Email",
   sharepoint: "URL",
   teams: null,
+  google_my_drive: "Email",
 };
 
 const STATUS_BADGE: Partial<Record<ManageCloudsRow["status"], { label: string; style: string }>> = {

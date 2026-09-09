@@ -96,7 +96,9 @@ export type CleanupResourceType =
   | "outlook_calendar"
   | "outlook_contacts"
   | "channel"
-  | "chat";
+  | "chat"
+  /** Google Workspace My Drive — a user's root Drive content, deleted via domain-wide delegation impersonating them. Same "select a user, delete their root-level content, never the account itself" granularity as onedrive_account. */
+  | "google_my_drive_account";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 /** Chosen by the operator on the confirmation screen — see migrations/013_cleanup_deletion_mode.sql. Only OneDrive/SharePoint/Outlook-mail items ever consult this; Teams/Calendar/Contacts are unaffected either way. */
@@ -111,6 +113,7 @@ export interface CleanupManifest {
   outlookContacts?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
+  googleMyDrive?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
@@ -123,6 +126,7 @@ export interface CleanupValidationResult {
     outlookContacts: number;
     channels: number;
     chats: number;
+    googleMyDriveAccounts: number;
   };
   /** Selected items that can never be executed under this app's Graph permissions — reported here, not in errors, since selecting them isn't invalid, just not actionable yet. */
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
@@ -136,6 +140,7 @@ export interface CleanupValidationResult {
     outlookContacts: string[];
     channels: string[];
     chats: string[];
+    googleMyDrive: string[];
   };
 }
 

@@ -67,6 +67,19 @@ export const config = {
     tokenTtlMinutes: Number(process.env.PASSWORD_RESET_TOKEN_TTL_MINUTES ?? 30),
   },
 
+  // Our own dedicated Google Cloud service account for domain-wide delegation into customer
+  // Workspace domains (My Drive / Shared Drives / Chat / Gmail) — one service account, owned by
+  // us, never a customer's. Deliberately NOT oauth.google below, which is an unrelated feature
+  // (operator "Sign in with Google" SSO login) — reusing those credentials here would either
+  // collide with that login flow or force sharing one OAuth client across two very different
+  // purposes/scopes. See docs/google-workspace-integration.md.
+  googleWorkspace: {
+    // A downloaded service-account JSON key file path (local dev) or the key's JSON content inline
+    // (prod, typically injected by a secrets manager) — exactly one should be set.
+    serviceAccountKeyPath: process.env.GOOGLE_WORKSPACE_SERVICE_ACCOUNT_KEY_PATH ?? "",
+    serviceAccountKeyJson: process.env.GOOGLE_WORKSPACE_SERVICE_ACCOUNT_KEY_JSON ?? "",
+  },
+
   oauth: {
     google: {
       clientId: process.env.GOOGLE_CLIENT_ID ?? "",

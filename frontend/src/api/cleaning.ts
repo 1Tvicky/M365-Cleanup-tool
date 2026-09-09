@@ -104,6 +104,10 @@ export function listOneDriveAccounts(connectionId: string, opts: ListOpts = {}):
   return rawFetch(`/api/cleaning/connections/${connectionId}/onedrive?${toQuery(opts)}`);
 }
 
+export function listGoogleMyDriveAccounts(connectionId: string, opts: ListOpts = {}): Promise<{ accounts: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/google-my-drive?${toQuery(opts)}`);
+}
+
 export function listSharePointSites(connectionId: string, opts: ListOpts = {}): Promise<{ sites: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/sharepoint?${toQuery(opts)}`);
 }
@@ -175,7 +179,8 @@ export type CleanupResourceType =
   | "outlook_calendar"
   | "outlook_contacts"
   | "channel"
-  | "chat";
+  | "chat"
+  | "google_my_drive_account";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 
@@ -188,6 +193,7 @@ export interface CleanupManifest {
   outlookContacts?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
+  googleMyDrive?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
@@ -200,6 +206,7 @@ export interface CleanupValidationResult {
     outlookContacts: number;
     channels: number;
     chats: number;
+    googleMyDriveAccounts: number;
   };
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
@@ -212,6 +219,7 @@ export interface CleanupValidationResult {
     outlookContacts: string[];
     channels: string[];
     chats: string[];
+    googleMyDrive: string[];
   };
 }
 

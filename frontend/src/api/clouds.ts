@@ -1,6 +1,6 @@
 import { rawFetch } from "./client";
 
-export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook";
+export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook" | "google_my_drive";
 export type ConnectionStatus = "connecting" | "active" | "error" | "needs_reauth" | "disconnected";
 
 export interface ManageCloudsRow {
@@ -88,6 +88,20 @@ export function exportConnectionUsersUrl(connectionId: string): string {
 
 export function initCloudConnect(cloudType: CloudType): Promise<{ authorizeUrl: string; state: string }> {
   return rawFetch(`/api/clouds/${cloudType}/connect/init`, { method: "POST" });
+}
+
+/**
+ * Google Workspace's connect action — deliberately not a popup/redirect like initCloudConnect
+ * above: domain-wide delegation is granted out-of-band by the customer's own Workspace super-admin
+ * in their Admin Console before this call, so this just verifies that grant and returns a
+ * connectionId synchronously. The caller then polls the same generic GET /api/clouds/:id/status
+ * every other connection's post-connect progress uses.
+ */
+export function verifyAndConnectGoogleMyDrive(domain: string, adminEmail: string): Promise<{ connectionId: string; status: "connecting" }> {
+  return rawFetch(`/api/google-clouds/connect/verify`, {
+    method: "POST",
+    body: JSON.stringify({ domain, adminEmail }),
+  });
 }
 
 /**

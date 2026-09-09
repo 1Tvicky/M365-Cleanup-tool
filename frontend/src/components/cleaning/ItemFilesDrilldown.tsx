@@ -9,7 +9,7 @@ const PAGE_SIZE = 20;
 // Only OneDrive/SharePoint/Outlook-mail items perform real permanent deletion
 // (graph/cleanupDeletion.ts) — Calendar/Contacts stay on plain soft delete regardless of the
 // operation's deletion_mode, so a 'deleted' file row for those must keep reading as "Removed."
-const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox"]);
+const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox", "google_my_drive_account"]);
 
 const BASE_STATUS_STYLE: Record<CleanupItemFileRow["status"], { label: string; className: string }> = {
   pending: { label: "Pending", className: "text-slate-400" },

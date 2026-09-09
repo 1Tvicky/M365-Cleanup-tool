@@ -5,6 +5,7 @@ import {
   getSyncOperation,
   getTeamsSummary,
   listCleaningConnections,
+  listGoogleMyDriveAccounts,
   listOneDriveAccounts,
   listOutlookCalendars,
   listOutlookContacts,
@@ -46,9 +47,21 @@ interface TenantGroup {
   sharepoint?: CleaningConnectionRow;
   teams?: CleaningConnectionRow;
   outlook?: CleaningConnectionRow;
+  google_my_drive?: CleaningConnectionRow;
 }
 
-type View = "landing" | "dashboard" | "onedrive" | "sharepoint" | "teams" | "outlook" | "review" | "cleanupConfirm" | "cleanupProgress" | "cleanupResults";
+type View =
+  | "landing"
+  | "dashboard"
+  | "onedrive"
+  | "sharepoint"
+  | "teams"
+  | "outlook"
+  | "google_my_drive"
+  | "review"
+  | "cleanupConfirm"
+  | "cleanupProgress"
+  | "cleanupResults";
 
 /**
  * Only these "browsing" views are reflected in the URL (as `?group=<domain>&view=<view>` on the same
@@ -114,7 +127,8 @@ function buildCleanupManifest(
   selectedOutlookCalendar: Map<string, CleaningResourceRow>,
   selectedOutlookContacts: Map<string, CleaningResourceRow>,
   selectedChannels: Map<string, CleaningChannelRow>,
-  selectedChats: Map<string, CleaningChatRow>
+  selectedChats: Map<string, CleaningChatRow>,
+  selectedGoogleMyDrive: Map<string, CleaningResourceRow>
 ): CleanupManifest {
   const manifest: CleanupManifest = {};
   if (selectedOneDrive.size > 0 && group.onedrive) manifest.oneDrive = { connectionId: group.onedrive.id, ids: [...selectedOneDrive.keys()] };
@@ -124,6 +138,7 @@ function buildCleanupManifest(
   if (selectedOutlookContacts.size > 0 && group.outlook) manifest.outlookContacts = { connectionId: group.outlook.id, ids: [...selectedOutlookContacts.keys()] };
   if (selectedChannels.size > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: [...selectedChannels.keys()] };
   if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
+  if (selectedGoogleMyDrive.size > 0 && group.google_my_drive) manifest.googleMyDrive = { connectionId: group.google_my_drive.id, ids: [...selectedGoogleMyDrive.keys()] };
   return manifest;
 }
 
@@ -168,6 +183,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   const [selectedOutlookContacts, setSelectedOutlookContacts] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
+  const [selectedGoogleMyDrive, setSelectedGoogleMyDrive] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
   const [reconciliationBanner, setReconciliationBanner] = useState<string | null>(null);
 
@@ -239,7 +255,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedOutlookCalendar,
       selectedOutlookContacts,
       selectedChannels,
-      selectedChats
+      selectedChats,
+      selectedGoogleMyDrive
     );
     try {
       const { foundIds } = await validateCleanup(manifest);
@@ -251,7 +268,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         (selectedOutlookCalendar.size - foundIds.outlookCalendar.length) +
         (selectedOutlookContacts.size - foundIds.outlookContacts.length) +
         (selectedChannels.size - foundIds.channels.length) +
-        (selectedChats.size - foundIds.chats.length);
+        (selectedChats.size - foundIds.chats.length) +
+        (selectedGoogleMyDrive.size - foundIds.googleMyDrive.length);
       if (removedCount > 0) {
         setSelectedOneDrive((prev) => pruneToFound(prev, foundIds.oneDrive));
         setSelectedSharePoint((prev) => pruneToFound(prev, foundIds.sharePoint));
@@ -260,8 +278,9 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         setSelectedOutlookContacts((prev) => pruneToFound(prev, foundIds.outlookContacts));
         setSelectedChannels((prev) => pruneToFound(prev, foundIds.channels));
         setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
+        setSelectedGoogleMyDrive((prev) => pruneToFound(prev, foundIds.googleMyDrive));
         setReconciliationBanner(
-          `${removedCount.toLocaleString()} selected item${removedCount === 1 ? " is" : "s are"} no longer available in Microsoft 365 — your selection has been updated.`
+          `${removedCount.toLocaleString()} selected item${removedCount === 1 ? " is" : "s are"} no longer available — your selection has been updated.`
         );
       }
     } catch {
@@ -287,13 +306,24 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       dms: selectedChats.size,
       dmMessages: [...selectedChats.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       dmsWithKnownCount: [...selectedChats.values()].filter((r) => r.countStatus === "completed").length,
+      googleMyDriveAccounts: selectedGoogleMyDrive.size,
+      googleMyDriveBytes: [...selectedGoogleMyDrive.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
     }),
-    [selectedOneDrive, selectedSharePoint, selectedOutlook, selectedOutlookCalendar, selectedOutlookContacts, selectedChannels, selectedChats]
+    [
+      selectedOneDrive,
+      selectedSharePoint,
+      selectedOutlook,
+      selectedOutlookCalendar,
+      selectedOutlookContacts,
+      selectedChannels,
+      selectedChats,
+      selectedGoogleMyDrive,
+    ]
   );
 
   function openTenant(group: TenantGroup) {
-    // Selections are scoped to one Microsoft 365 cloud at a time — switching tenants without
-    // clearing them would let a review mix data from two different customers' tenants together.
+    // Selections are scoped to one tenant at a time — switching tenants without clearing them
+    // would let a review mix data from two different customers' tenants together.
     setSelectedOneDrive(new Map());
     setSelectedSharePoint(new Map());
     setSelectedOutlook(new Map());
@@ -301,6 +331,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     setSelectedOutlookContacts(new Map());
     setSelectedChannels(new Map());
     setSelectedChats(new Map());
+    setSelectedGoogleMyDrive(new Map());
     setActiveGroup(group);
     setView("dashboard");
   }
@@ -332,7 +363,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           selectedOutlookCalendar,
           selectedOutlookContacts,
           selectedChannels,
-          selectedChats
+          selectedChats,
+          selectedGoogleMyDrive
         )}
         onBack={() => setView("review")}
         onStarted={(operationId) => {
@@ -369,6 +401,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           setSelectedOutlookContacts(new Map());
           setSelectedChannels(new Map());
           setSelectedChats(new Map());
+          setSelectedGoogleMyDrive(new Map());
           setCleanupOperationId(null);
           setView("dashboard");
         }}
@@ -378,7 +411,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
 
   // Only shown on the actual selection tables — not on the dashboard or landing page, where it
   // would float over content with no table underneath it for the selection to relate to.
-  const showSelectionBar = (view === "onedrive" || view === "sharepoint" || view === "outlook" || view === "teams") && hasSelection(totals);
+  const showSelectionBar =
+    (view === "onedrive" || view === "sharepoint" || view === "outlook" || view === "teams" || view === "google_my_drive") && hasSelection(totals);
 
   return (
     <div className={`px-8 py-6 ${showSelectionBar ? "pb-24" : ""}`}>
@@ -412,6 +446,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
               onOpenSharePoint={() => setView("sharepoint")}
               onOpenTeams={() => setView("teams")}
               onOpenOutlook={() => setView("outlook")}
+              onOpenGoogleMyDrive={() => setView("google_my_drive")}
               onSyncFinished={handleSyncFinished}
             />
           </>
@@ -448,6 +483,10 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
             setSelectedChats={setSelectedChats}
           />
         )}
+
+        {view === "google_my_drive" && activeGroup?.google_my_drive && (
+          <GoogleMyDriveView connectionId={activeGroup.google_my_drive.id} selected={selectedGoogleMyDrive} setSelected={setSelectedGoogleMyDrive} />
+        )}
       </div>
 
       {showSelectionBar && <SelectionSummary totals={totals} onReview={() => setView("review")} />}
@@ -460,7 +499,7 @@ function Landing({ groups, loading, onOpen }: { groups: TenantGroup[]; loading: 
   if (groups.length === 0) {
     return (
       <p className="rounded-lg border border-dashed border-slate-300 px-4 py-8 text-center text-sm text-slate-500">
-        No Microsoft 365 clouds connected yet — connect one from the Clouds tab first.
+        No clouds connected yet — connect one from the Clouds tab first.
       </p>
     );
   }
@@ -710,6 +749,7 @@ function Dashboard({
   onOpenSharePoint,
   onOpenTeams,
   onOpenOutlook,
+  onOpenGoogleMyDrive,
   onSyncFinished,
 }: {
   group: TenantGroup;
@@ -717,6 +757,7 @@ function Dashboard({
   onOpenSharePoint: () => void;
   onOpenTeams: () => void;
   onOpenOutlook: () => void;
+  onOpenGoogleMyDrive: () => void;
   onSyncFinished: () => void;
 }) {
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
@@ -725,6 +766,7 @@ function Dashboard({
   const [outlookCalendarTotals, setOutlookCalendarTotals] = useState<{ events: number } | null>(null);
   const [outlookContactTotals, setOutlookContactTotals] = useState<{ contacts: number } | null>(null);
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
+  const [googleMyDriveTotals, setGoogleMyDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
 
   const refreshTotals = useCallback(() => {
     if (group.onedrive) {
@@ -733,6 +775,11 @@ function Dashboard({
         // covers the dashboard headline for realistically-sized tenants — the full table (with real
         // pagination) is what "View Accounts" opens.
         setOneDriveTotals({ count: total, bytes: accounts.reduce((s, a) => s + a.storageUsedBytes, 0) });
+      });
+    }
+    if (group.google_my_drive) {
+      listGoogleMyDriveAccounts(group.google_my_drive.id, { sort: "storage", pageSize: 200 }).then(({ accounts, total }) => {
+        setGoogleMyDriveTotals({ count: total, bytes: accounts.reduce((s, a) => s + a.storageUsedBytes, 0) });
       });
     }
     if (group.sharepoint) {
@@ -898,6 +945,38 @@ function Dashboard({
             )
           }
         />
+        <ServiceCard
+          icon="🔷"
+          name="Google My Drive"
+          stats={
+            group.google_my_drive ? (
+              googleMyDriveTotals ? (
+                <>
+                  <div>{googleMyDriveTotals.count.toLocaleString()}{googleMyDriveTotals.count > 0 ? "+" : ""} accounts</div>
+                  <div>{formatBytes(googleMyDriveTotals.bytes)} used</div>
+                </>
+              ) : (
+                <div className="italic text-slate-400">Loading…</div>
+              )
+            ) : (
+              <div className="text-slate-400">Not connected</div>
+            )
+          }
+          action="View Accounts"
+          onClick={onOpenGoogleMyDrive}
+          disabled={!group.google_my_drive}
+          // This dashboard's own inline "Sync Now" control (CloudSyncControl) wraps a separate
+          // tenant-level multi-resource sync_operations table (onedrive/sharepoint/outlook/teams
+          // fixed columns) not yet extended for Google in this pass — deferred, see
+          // docs/google-workspace-integration.md. My Drive syncing already works end-to-end via
+          // Manage Clouds' per-connection Resync (routes/cloudConnections.ts), same as every other
+          // workload; only this convenience shortcut is missing.
+          syncControl={
+            group.google_my_drive && (
+              <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>
+            )
+          }
+        />
       </div>
     </div>
   );
@@ -1057,6 +1136,61 @@ function OneDriveView({ connectionId, selected, setSelected }: { connectionId: s
           setSelected(next);
         }}
         emptyMessage="No OneDrive accounts found."
+      />
+    </div>
+  );
+}
+
+/** Identical shape to OneDriveView above — same CleaningResourceRow, same StorageUsedCell (including its deletionRecalcHint lag note, which listCleaningResources already computes generically for google_my_drive_account). */
+function GoogleMyDriveView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<"storage" | "name">("storage");
+  const fetcher = useCallback(
+    (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) =>
+      listGoogleMyDriveAccounts(connectionId, opts).then((r) => ({ rows: r.accounts, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search, sort);
+
+  const columns: DiscoveryColumn<CleaningResourceRow>[] = [
+    { label: "User Name", render: (r) => r.name },
+    { label: "User Email", render: (r) => r.detail },
+    { label: "Storage Used", align: "right", render: (r) => <StorageUsedCell row={r} /> },
+    { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
+  ];
+
+  return (
+    <div>
+      <h2 className="mb-1 text-lg font-semibold text-slate-800">Google My Drive</h2>
+      <p className="mb-5 text-sm text-slate-500">All Workspace user accounts and their storage usage</p>
+      <DiscoveryTable
+        title="Google My Drive Accounts"
+        columns={columns}
+        rows={rows}
+        loading={loading}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search users…"
+        sortOptions={[{ value: "storage", label: "Storage" }, { value: "name", label: "Name" }]}
+        sort={sort}
+        onSortChange={(v) => setSort(v as "storage" | "name")}
+        selected={new Set(selected.keys())}
+        onToggle={(id) => {
+          const row = rows.find((r) => r.id === id);
+          if (row) toggleInMap(selected, setSelected, id, row);
+        }}
+        onToggleAll={() => {
+          const allSelected = rows.every((r) => selected.has(r.id));
+          const next = new Map(selected);
+          for (const r of rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
+          setSelected(next);
+        }}
+        emptyMessage="No Google My Drive accounts found."
       />
     </div>
   );

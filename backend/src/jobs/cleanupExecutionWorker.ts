@@ -18,6 +18,8 @@ import {
 } from "../graph/cleanupDeletion.js";
 import { runThrottled } from "../services/rateLimiter.js";
 import { connection as redis } from "./queue.js";
+import { classifyGoogleDeleteError } from "../graph/googleDriveDeletion.js";
+import { executeGoogleMyDriveItem, isGoogleReauthCleanupError } from "./googleDriveCleanupExecution.js";
 
 /**
  * Mirrors jobs/cleaningScanWorker.ts's shape (same join-by-id pattern, same runThrottled usage,
@@ -54,11 +56,11 @@ async function isCancelled(operationId: string): Promise<boolean> {
   return result.rows[0]?.cancel_requested_at != null;
 }
 
-interface PendingItem {
+export interface PendingItem {
   id: string;
   connection_id: string;
-  resource_type: "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "outlook_calendar" | "outlook_contacts";
-  graph_ref: { userId?: string; siteId?: string };
+  resource_type: "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "outlook_calendar" | "outlook_contacts" | "google_my_drive_account";
+  graph_ref: { userId?: string; siteId?: string; userEmail?: string };
 }
 
 /** Deletes every top-level file/folder inside the account's OneDrive or the site's default document library. Never touches the account or site itself. */
@@ -270,8 +272,8 @@ export const cleanupExecutionWorker = new Worker(
   async (job) => {
     const { operationId } = job.data as { operationId: string };
 
-    const opRow = await query<{ tenant_id: string; m365_tenant_id: string; deletion_mode: "recycle_bin" | "permanent" }>(
-      `SELECT co.tenant_id, t.m365_tenant_id, co.deletion_mode
+    const opRow = await query<{ tenant_id: string; m365_tenant_id: string | null; google_customer_id: string | null; deletion_mode: "recycle_bin" | "permanent" }>(
+      `SELECT co.tenant_id, t.m365_tenant_id, t.google_customer_id, co.deletion_mode
        FROM cleanup_operations co
        JOIN tenants t ON t.id = co.tenant_id
        WHERE co.id = $1`,
@@ -296,12 +298,26 @@ export const cleanupExecutionWorker = new Worker(
       await logConnectionEvent("cleanup_started", connectionId, info.tenant_id, { operationId });
     }
 
+    const isGoogle = info.google_customer_id !== null;
+
     try {
-      const client = await graphClientForTenant(info.m365_tenant_id);
       let successful = 0;
       let failed = 0;
 
-      await runThrottled(pending.rows, (item) => executeAnyItem(client, item, operationId, permanent), {
+      // Every item in one cleanup_operations row belongs to exactly one tenant, and every tenant is
+      // exactly one vendor (M365 xor Google — see migrations/014_google_my_drive.sql), so this
+      // branches once per job, not per item. Google needs no single shared client the way Graph
+      // does — executeGoogleMyDriveItem builds its own per-item impersonated client from the item's
+      // own graph_ref.userEmail.
+      let execute: (item: PendingItem) => Promise<void>;
+      if (isGoogle) {
+        execute = (item) => executeGoogleMyDriveItem(item, operationId, permanent);
+      } else {
+        const client = await graphClientForTenant(info.m365_tenant_id!);
+        execute = (item) => executeAnyItem(client, item, operationId, permanent);
+      }
+
+      await runThrottled(pending.rows, execute, {
         isCancelled: () => isCancelled(operationId),
         batchSize: 3, // conservative — each item itself fans out into its own (throttled) per-file deletes; tune after the first live test run
         // executeAnyItem is a whole list-everything/seed-DB/delete-everything pipeline per item, not
@@ -323,7 +339,7 @@ export const cleanupExecutionWorker = new Worker(
             );
           } else {
             failed++;
-            const { code, message } = classifyDeleteError(result.error);
+            const { code, message } = isGoogle ? classifyGoogleDeleteError(result.error) : classifyDeleteError(result.error);
             await query(
               `UPDATE cleanup_operation_items
                SET status = 'failed', attempts = attempts + 1, completed_at = now(), updated_at = now(), error_code = $2, error_message = $3
@@ -349,7 +365,7 @@ export const cleanupExecutionWorker = new Worker(
         );
       }
     } catch (err) {
-      if (isReauthError(err)) {
+      if (isGoogle ? isGoogleReauthCleanupError(err) : isReauthError(err)) {
         for (const connectionId of touchedConnections) {
           await query(`UPDATE connections SET status = 'needs_reauth', last_error = $2 WHERE id = $1`, [connectionId, String(err)]);
         }

@@ -1,12 +1,14 @@
 import type { CloudConnector, Preview, Tenant } from "../types";
 
-// Phase 1 (M365 only) — mirrors CloudFuze's "Business Clouds" tile grid, scoped to the four
-// workloads this tool cleans up. Broader clouds (Google, Box, Slack, etc.) are out of scope here.
+// Mirrors CloudFuze's "Business Clouds" tile grid. Google Workspace's My Drive is the first Google
+// workload added alongside the original four M365 ones (Shared Drives/Chat/Gmail follow in later
+// passes) — see docs/google-workspace-integration.md.
 export const CONNECTORS: CloudConnector[] = [
   { id: "onedrive", label: "OneDrive for business" },
   { id: "sharepoint", label: "SharePoint online" },
   { id: "teams", label: "Microsoft Teams" },
   { id: "outlook", label: "Outlook" },
+  { id: "google_my_drive", label: "Google My Drive" },
 ];
 
 export const MOCK_TENANTS: Tenant[] = [

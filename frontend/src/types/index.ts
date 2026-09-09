@@ -1,4 +1,4 @@
-export type Workload = "teams" | "onedrive" | "sharepoint" | "outlook";
+export type Workload = "teams" | "onedrive" | "sharepoint" | "outlook" | "google_my_drive";
 export type TenantStatus = "connected" | "consent_pending" | "token_error" | "disconnected";
 export type JobStatus =
   | "export_in_progress"
