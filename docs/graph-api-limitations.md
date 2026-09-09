@@ -96,10 +96,19 @@ call that forces this recalculation, and no reliable way to know from the client
 caught up.
 
 **Action taken**: rather than trying to force or detect Graph's own recalculation, `routes/
-cleaning.ts`'s `listCleaningResources` (OneDrive/SharePoint/Outlook Mailboxes) flags a resource's
-storage/item figures as `pendingSyncAfterDelete` for 24h after its last permanent-deletion cleanup
-completed, regardless of whether a sync ran in between — that 24h window is a heuristic based on
-observed real-world resolution time, not a documented Microsoft SLA. The frontend (`pages/
-CleaningPage.tsx`'s `StorageUsedCell`) surfaces this as a plain note next to the figure so it reads
-as "still catching up," not as a broken sync or a failed deletion. Re-syncing sooner will not fix
-this — only Graph's own backend job resolves it.
+cleaning.ts`'s `listCleaningResources` (OneDrive/SharePoint/Outlook Mailboxes) computes a
+`deletionRecalcHint` for a resource based on how long ago its last permanent-deletion cleanup
+completed, regardless of whether a sync ran in between — both windows are heuristics based on
+observed real-world resolution time, not a documented Microsoft SLA:
+
+- **0–24h (`'recent'`)**: the common case. `pages/CleaningPage.tsx`'s `StorageUsedCell` shows a
+  direct "may not reflect a recent deletion yet" note next to the figure, so it reads as "still
+  catching up," not as a broken sync or a failed deletion.
+- **24h–7d (`'verify'`)**: Microsoft doesn't guarantee this resolves within a day, so rather than
+  either silently dropping the hint (making a still-wrong number look normal) or keeping the same
+  urgency indefinitely, this tapers to a softer "still looks off? check the admin center" note —
+  the one case where we genuinely can't tell from here whether Graph has caught up.
+- **past 7d (`null`)**: no hint at all, so a resource with no recent permanent deletion (or one long
+  enough ago that Graph has almost certainly caught up) doesn't carry a stale warning forever.
+
+Re-syncing sooner does not fix this in any window — only Graph's own backend job resolves it.

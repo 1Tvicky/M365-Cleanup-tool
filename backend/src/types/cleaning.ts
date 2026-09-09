@@ -25,14 +25,20 @@ export interface CleaningResourceRow {
   status: "pending" | "synced" | "failed";
   lastSyncedAt: string | null;
   /**
-   * True while a permanent-deletion cleanup completed against this resource within the last 24h
-   * (see STORAGE_RECALC_GRACE_PERIOD_MS in routes/cleaning.ts) — a UI hint only, not "hasn't synced
-   * since the delete." Microsoft's own storage-quota recalculation runs asynchronously on their
-   * backend and can lag a real deletion by minutes or longer, so even a sync that ran after the
-   * delete can still return the pre-deletion figure; there's no reliable way to know when Graph has
-   * actually caught up, so this is a time-based heuristic, not a guarantee.
+   * Set for a while after a permanent-deletion cleanup completed against this resource, to explain
+   * why storageUsedBytes/itemCount might still look pre-deletion — not "hasn't synced since the
+   * delete." Microsoft's own storage-quota recalculation runs asynchronously on their backend and
+   * can lag a real deletion by minutes or longer, so even a sync that ran after the delete can still
+   * return the old figure; there's no reliable way to know from here when Graph has actually caught
+   * up, so both windows below (see routes/cleaning.ts) are time-based heuristics, not guarantees.
+   * - 'recent': within the first 24h — the common case, reads as "still catching up."
+   * - 'verify': 24h–7d out — Microsoft publishes no SLA for this recalculation, so rather than
+   *   silently dropping the hint (making a still-wrong number look normal) or keeping the same
+   *   urgency indefinitely, this tapers to a softer "check the admin center" suggestion for the
+   *   rare long tail.
+   * - null: no recent permanent deletion, or more than 7 days have passed.
    */
-  pendingSyncAfterDelete: boolean;
+  deletionRecalcHint: "recent" | "verify" | null;
 }
 
 export interface CleaningChannelRow {

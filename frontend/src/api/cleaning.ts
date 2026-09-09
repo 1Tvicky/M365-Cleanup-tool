@@ -20,13 +20,15 @@ export interface CleaningResourceRow {
   status: "pending" | "synced" | "failed";
   lastSyncedAt: string | null;
   /**
-   * True while a permanent-deletion cleanup completed against this resource within the last 24h —
-   * a UI hint only, not "hasn't synced since the delete." Microsoft's own storage-quota
-   * recalculation runs asynchronously on their backend and can lag a real deletion by minutes or
-   * longer, so even a sync that ran after the delete can still return storageUsedBytes/itemCount
-   * from before it.
+   * Set for a while after a permanent-deletion cleanup completed against this resource, to explain
+   * why storageUsedBytes/itemCount might still look pre-deletion — not "hasn't synced since the
+   * delete." Microsoft's own storage-quota recalculation runs asynchronously on their backend and
+   * can lag a real deletion by minutes or longer, even past a sync that ran after the delete.
+   * - 'recent': within the first 24h — the common case.
+   * - 'verify': 24h–7d out — the rare long tail; softer wording, suggests checking independently.
+   * - null: no recent permanent deletion, or more than 7 days have passed.
    */
-  pendingSyncAfterDelete: boolean;
+  deletionRecalcHint: "recent" | "verify" | null;
 }
 
 export type CountStatus = "pending" | "calculating" | "completed" | "failed";

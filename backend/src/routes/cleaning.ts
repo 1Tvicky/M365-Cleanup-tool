@@ -178,15 +178,24 @@ function lastPermanentDeleteJoin(resourceType: CleanupResourceType): string {
  * last permanent deletion. Deliberately NOT "has this resource been synced since the delete" —
  * confirmed against real data that a sync run moments *after* a permanent delete completed can still
  * return Graph's not-yet-recalculated quota.used, so "synced later" doesn't prove the number is
- * right. This is a heuristic, not a guarantee: real-world reports of Microsoft's own storage-quota
- * recalculation lag mostly resolve within a day, so we stop flagging after that to avoid shadowing
- * old, since-corrected numbers indefinitely.
+ * right. Both windows are heuristics, not guarantees — Microsoft publishes no SLA for this
+ * recalculation:
+ * - Real-world reports of this lag mostly resolve within a day (STORAGE_RECALC_GRACE_PERIOD_MS) —
+ *   the common case, worth a direct "still catching up" note.
+ * - Past that but within a week (STORAGE_RECALC_EXTENDED_WINDOW_MS), rather than either silently
+ *   dropping the hint (making a still-wrong number look normal) or keeping the same urgency
+ *   indefinitely, we taper to a softer "verify independently" suggestion for the rare long tail.
+ * - Past a week, we stop flagging entirely, to avoid shadowing old, since-corrected numbers forever.
  */
 const STORAGE_RECALC_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
+const STORAGE_RECALC_EXTENDED_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
 
-function toPendingSyncAfterDelete(lastPermanentDeleteAt: string | null): boolean {
-  if (!lastPermanentDeleteAt) return false;
-  return Date.now() - new Date(lastPermanentDeleteAt).getTime() < STORAGE_RECALC_GRACE_PERIOD_MS;
+function toDeletionRecalcHint(lastPermanentDeleteAt: string | null): "recent" | "verify" | null {
+  if (!lastPermanentDeleteAt) return null;
+  const age = Date.now() - new Date(lastPermanentDeleteAt).getTime();
+  if (age < STORAGE_RECALC_GRACE_PERIOD_MS) return "recent";
+  if (age < STORAGE_RECALC_EXTENDED_WINDOW_MS) return "verify";
+  return null;
 }
 
 /** Shared by OneDrive, SharePoint, and Outlook Mailboxes — all read connection_users directly, no Graph calls, no job. */
@@ -231,7 +240,7 @@ async function listCleaningResources(
     itemCount: r.item_count,
     status: r.sync_status as CleaningResourceRow["status"],
     lastSyncedAt: r.last_synced_at,
-    pendingSyncAfterDelete: toPendingSyncAfterDelete(r.last_permanent_delete_at),
+    deletionRecalcHint: toDeletionRecalcHint(r.last_permanent_delete_at),
   }));
 
   return { rows, total, page: opts.page, pageSize: opts.pageSize };
@@ -313,7 +322,7 @@ async function listOutlookCalendarSummaries(
     // Calendar events always go through a plain soft DELETE regardless of an operation's
     // deletion_mode (see cleanupExecutionWorker.ts's executeCalendarItem) — never permanently
     // deleted, so this never applies here.
-    pendingSyncAfterDelete: false,
+    deletionRecalcHint: null,
   }));
 
   return { rows, total, page: opts.page, pageSize: opts.pageSize };
@@ -369,7 +378,7 @@ async function listOutlookContactSummaries(
     // Contacts always go through a plain soft DELETE regardless of an operation's deletion_mode
     // (see cleanupExecutionWorker.ts's executeContactItem) — never permanently deleted, so this
     // never applies here.
-    pendingSyncAfterDelete: false,
+    deletionRecalcHint: null,
   }));
 
   return { rows, total, page: opts.page, pageSize: opts.pageSize };

@@ -979,22 +979,29 @@ function toggleInMap<T>(map: Map<string, T>, setMap: (m: Map<string, T>) => void
  * permanent deletion — Microsoft's own storage-quota recalculation runs asynchronously on their
  * backend and can lag a real deletion by minutes or longer, so even a sync that ran *after* the
  * delete can still return the old number. There's no "just sync again" fix for that, so
- * row.pendingSyncAfterDelete exists purely to set the right expectation here instead.
+ * row.deletionRecalcHint exists purely to set the right expectation here instead: a direct note for
+ * the common first-24h case, tapering to a softer "verify independently" suggestion for the rare
+ * case where Microsoft still hasn't caught up a week later (see routes/cleaning.ts).
  */
 function StorageUsedCell({ row }: { row: CleaningResourceRow }) {
+  const lastSyncedNote = row.lastSyncedAt ? `Last synced ${formatDate(row.lastSyncedAt)}. ` : "";
   return (
     <div>
       <div>{formatBytes(row.storageUsedBytes)}</div>
-      {row.pendingSyncAfterDelete && (
+      {row.deletionRecalcHint === "recent" && (
         <div
           className="text-xs text-amber-600"
-          title={
-            row.lastSyncedAt
-              ? `Last synced ${formatDate(row.lastSyncedAt)}. Microsoft can take a while to recalculate storage after a deletion — this may not be caught up yet.`
-              : "Microsoft can take a while to recalculate storage after a deletion — this may not be caught up yet."
-          }
+          title={`${lastSyncedNote}Microsoft can take a while to recalculate storage after a deletion — this may not be caught up yet.`}
         >
           May not reflect a recent deletion yet
+        </div>
+      )}
+      {row.deletionRecalcHint === "verify" && (
+        <div
+          className="text-xs text-slate-400"
+          title={`${lastSyncedNote}It's been a while since the last permanent deletion here — Microsoft usually catches up within a day, but doesn't guarantee a timeline. If this figure still looks wrong, check the Microsoft 365 admin center directly.`}
+        >
+          Still looks off? Check the admin center
         </div>
       )}
     </div>
@@ -1123,7 +1130,7 @@ function toSelectionRow(mailbox: OutlookMailboxRow, sub: OutlookOverviewSubResou
     itemCount: sub.itemCount,
     status: sub.status,
     lastSyncedAt: null,
-    pendingSyncAfterDelete: false,
+    deletionRecalcHint: null,
   };
 }
 
