@@ -82,3 +82,24 @@ enumerates *sites*. For `cloud_type = 'sharepoint'`, each `connection_users` row
 `display_name` holds the site's display name. This is a deliberate schema reuse (documented inline
 in `graph/cloudEnumeration.ts`), not an accident — flagging it here too so it isn't mistaken for a
 data-quality bug later.
+
+## OneDrive/SharePoint storage-quota recalculation lags real deletions
+
+`graph/cloudEnumeration.ts`'s `getUserDriveQuota()` reads a drive's storage usage from Graph's
+`quota.used` field (`GET /users/{id}/drive?$select=quota,root`) — the same account-level aggregate
+Microsoft's own admin center shows. That field is maintained by an **asynchronous backend job on
+Microsoft's side**, not computed live from the drive's actual contents. Confirmed against real data
+in this tenant: a resource synced *after* a permanent-deletion cleanup had already completed still
+came back with its pre-deletion `quota.used` value — `item_count` from the same sync had already
+dropped to 0, so enumeration was current; only the storage aggregate was stale. There is no Graph
+call that forces this recalculation, and no reliable way to know from the client side when it's
+caught up.
+
+**Action taken**: rather than trying to force or detect Graph's own recalculation, `routes/
+cleaning.ts`'s `listCleaningResources` (OneDrive/SharePoint/Outlook Mailboxes) flags a resource's
+storage/item figures as `pendingSyncAfterDelete` for 24h after its last permanent-deletion cleanup
+completed, regardless of whether a sync ran in between — that 24h window is a heuristic based on
+observed real-world resolution time, not a documented Microsoft SLA. The frontend (`pages/
+CleaningPage.tsx`'s `StorageUsedCell`) surfaces this as a plain note next to the figure so it reads
+as "still catching up," not as a broken sync or a failed deletion. Re-syncing sooner will not fix
+this — only Graph's own backend job resolves it.

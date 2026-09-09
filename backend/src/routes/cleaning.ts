@@ -147,15 +147,58 @@ function parsePageQuery(req: { query: Record<string, unknown> }) {
   return { search, sort, page, pageSize };
 }
 
-/** Shared by OneDrive and SharePoint — both read connection_users directly, no Graph calls, no job. */
+/**
+ * Fragment shared by every listCleaningResources-family query below: for one resource row, finds
+ * when a permanent-deletion cleanup last completed against it. Joined by resource_id + resource_type
+ * (resource_id alone, a gen_random_uuid(), is already effectively unique — resource_type is added
+ * defensively, and connection_id purely so the planner can use cleanup_operation_items_connection_idx).
+ * resourceType is always a hardcoded call-site literal from the CleanupResourceType union, never
+ * request input, so inlining it here (rather than as a bound parameter, which would need every
+ * caller's own `$n` numbering to line up) carries no injection risk.
+ * This is a per-row LATERAL subquery over a paginated (page-size-bounded) result set, not a
+ * full-table scan, so it doesn't introduce the kind of cost that would call for a
+ * materialized/precomputed column instead.
+ */
+function lastPermanentDeleteJoin(resourceType: CleanupResourceType): string {
+  return `
+     LEFT JOIN LATERAL (
+       SELECT MAX(coi.completed_at) AS at
+       FROM cleanup_operation_items coi
+       JOIN cleanup_operations co ON co.id = coi.cleanup_operation_id
+       WHERE coi.resource_id = r.id
+         AND coi.connection_id = r.connection_id
+         AND coi.resource_type = '${resourceType}'
+         AND coi.status = 'completed'
+         AND co.deletion_mode = 'permanent'
+     ) last_permanent_delete ON true`;
+}
+
+/**
+ * How long we keep flagging a resource's storage/item figures as possibly not caught up, after its
+ * last permanent deletion. Deliberately NOT "has this resource been synced since the delete" —
+ * confirmed against real data that a sync run moments *after* a permanent delete completed can still
+ * return Graph's not-yet-recalculated quota.used, so "synced later" doesn't prove the number is
+ * right. This is a heuristic, not a guarantee: real-world reports of Microsoft's own storage-quota
+ * recalculation lag mostly resolve within a day, so we stop flagging after that to avoid shadowing
+ * old, since-corrected numbers indefinitely.
+ */
+const STORAGE_RECALC_GRACE_PERIOD_MS = 24 * 60 * 60 * 1000;
+
+function toPendingSyncAfterDelete(lastPermanentDeleteAt: string | null): boolean {
+  if (!lastPermanentDeleteAt) return false;
+  return Date.now() - new Date(lastPermanentDeleteAt).getTime() < STORAGE_RECALC_GRACE_PERIOD_MS;
+}
+
+/** Shared by OneDrive, SharePoint, and Outlook Mailboxes — all read connection_users directly, no Graph calls, no job. */
 async function listCleaningResources(
   connectionId: string,
+  resourceType: CleanupResourceType,
   opts: { search: string | null; sort: "storage" | "name"; page: number; pageSize: number }
 ): Promise<PageResult<CleaningResourceRow>> {
-  const searchClause = `($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')`;
+  const searchClause = `($2::text IS NULL OR r.upn ILIKE '%' || $2 || '%' OR r.display_name ILIKE '%' || $2 || '%')`;
 
   const countResult = await query<{ count: string }>(
-    `SELECT COUNT(*) FROM connection_users WHERE connection_id = $1 AND ${searchClause}`,
+    `SELECT COUNT(*) FROM connection_users WHERE connection_id = $1 AND ($2::text IS NULL OR upn ILIKE '%' || $2 || '%' OR display_name ILIKE '%' || $2 || '%')`,
     [connectionId, opts.search]
   );
   const total = Number(countResult.rows[0]!.count);
@@ -167,11 +210,15 @@ async function listCleaningResources(
     storage_used_bytes: string;
     item_count: number;
     sync_status: string;
+    last_synced_at: string | null;
+    last_permanent_delete_at: string | null;
   }>(
-    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status
-     FROM connection_users
-     WHERE connection_id = $1 AND ${searchClause}
-     ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
+    `SELECT r.id, r.display_name, r.upn, r.storage_used_bytes, r.item_count, r.sync_status, r.last_synced_at,
+            last_permanent_delete.at AS last_permanent_delete_at
+     FROM connection_users r
+     ${lastPermanentDeleteJoin(resourceType)}
+     WHERE r.connection_id = $1 AND ${searchClause}
+     ORDER BY ${opts.sort === "storage" ? "r.storage_used_bytes DESC" : "COALESCE(r.display_name, r.upn)"}, r.id
      LIMIT $3 OFFSET $4`,
     [connectionId, opts.search, opts.pageSize, (opts.page - 1) * opts.pageSize]
   );
@@ -183,6 +230,8 @@ async function listCleaningResources(
     storageUsedBytes: Number(r.storage_used_bytes),
     itemCount: r.item_count,
     status: r.sync_status as CleaningResourceRow["status"],
+    lastSyncedAt: r.last_synced_at,
+    pendingSyncAfterDelete: toPendingSyncAfterDelete(r.last_permanent_delete_at),
   }));
 
   return { rows, total, page: opts.page, pageSize: opts.pageSize };
@@ -193,7 +242,7 @@ cleaningRouter.get(
   "/connections/:id/onedrive",
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId, "onedrive");
-    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, "onedrive_account", parsePageQuery(req));
     res.json({ accounts: rows, total, page, pageSize });
   })
 );
@@ -203,7 +252,7 @@ cleaningRouter.get(
   "/connections/:id/sharepoint",
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId, "sharepoint");
-    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, "sharepoint_site", parsePageQuery(req));
     res.json({ sites: rows, total, page, pageSize });
   })
 );
@@ -213,7 +262,7 @@ cleaningRouter.get(
   "/connections/:id/outlook",
   asyncHandler(async (req, res) => {
     await requireConnectionAccess(req.params.id!, req.session!.operatorId, "outlook");
-    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, parsePageQuery(req));
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, "outlook_mailbox", parsePageQuery(req));
     res.json({ mailboxes: rows, total, page, pageSize });
   })
 );
@@ -243,8 +292,9 @@ async function listOutlookCalendarSummaries(
     storage_used_bytes: string;
     item_count: number;
     sync_status: string;
+    last_synced_at: string | null;
   }>(
-    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status
+    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status, last_synced_at
      FROM connection_outlook_calendars
      WHERE connection_id = $1 AND ${searchClause}
      ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
@@ -259,6 +309,11 @@ async function listOutlookCalendarSummaries(
     storageUsedBytes: Number(r.storage_used_bytes),
     itemCount: r.item_count,
     status: r.sync_status as CleaningResourceRow["status"],
+    lastSyncedAt: r.last_synced_at,
+    // Calendar events always go through a plain soft DELETE regardless of an operation's
+    // deletion_mode (see cleanupExecutionWorker.ts's executeCalendarItem) — never permanently
+    // deleted, so this never applies here.
+    pendingSyncAfterDelete: false,
   }));
 
   return { rows, total, page: opts.page, pageSize: opts.pageSize };
@@ -293,8 +348,9 @@ async function listOutlookContactSummaries(
     storage_used_bytes: string;
     item_count: number;
     sync_status: string;
+    last_synced_at: string | null;
   }>(
-    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status
+    `SELECT id, display_name, upn, storage_used_bytes, item_count, sync_status, last_synced_at
      FROM connection_outlook_contacts
      WHERE connection_id = $1 AND ${searchClause}
      ORDER BY ${opts.sort === "storage" ? "storage_used_bytes DESC" : "COALESCE(display_name, upn)"}, id
@@ -309,6 +365,11 @@ async function listOutlookContactSummaries(
     storageUsedBytes: Number(r.storage_used_bytes),
     itemCount: r.item_count,
     status: r.sync_status as CleaningResourceRow["status"],
+    lastSyncedAt: r.last_synced_at,
+    // Contacts always go through a plain soft DELETE regardless of an operation's deletion_mode
+    // (see cleanupExecutionWorker.ts's executeContactItem) — never permanently deleted, so this
+    // never applies here.
+    pendingSyncAfterDelete: false,
   }));
 
   return { rows, total, page: opts.page, pageSize: opts.pageSize };

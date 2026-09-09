@@ -974,6 +974,33 @@ function toggleInMap<T>(map: Map<string, T>, setMap: (m: Map<string, T>) => void
   setMap(next);
 }
 
+/**
+ * The storage figure alone can't tell a viewer whether it's already caught up with a recent
+ * permanent deletion — Microsoft's own storage-quota recalculation runs asynchronously on their
+ * backend and can lag a real deletion by minutes or longer, so even a sync that ran *after* the
+ * delete can still return the old number. There's no "just sync again" fix for that, so
+ * row.pendingSyncAfterDelete exists purely to set the right expectation here instead.
+ */
+function StorageUsedCell({ row }: { row: CleaningResourceRow }) {
+  return (
+    <div>
+      <div>{formatBytes(row.storageUsedBytes)}</div>
+      {row.pendingSyncAfterDelete && (
+        <div
+          className="text-xs text-amber-600"
+          title={
+            row.lastSyncedAt
+              ? `Last synced ${formatDate(row.lastSyncedAt)}. Microsoft can take a while to recalculate storage after a deletion — this may not be caught up yet.`
+              : "Microsoft can take a while to recalculate storage after a deletion — this may not be caught up yet."
+          }
+        >
+          May not reflect a recent deletion yet
+        </div>
+      )}
+    </div>
+  );
+}
+
 function OneDriveView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
   const [search, setSearch] = useState("");
   const [sort, setSort] = useState<"storage" | "name">("storage");
@@ -987,7 +1014,7 @@ function OneDriveView({ connectionId, selected, setSelected }: { connectionId: s
   const columns: DiscoveryColumn<CleaningResourceRow>[] = [
     { label: "User Name", render: (r) => r.name },
     { label: "User Email", render: (r) => r.detail },
-    { label: "Storage Used", align: "right", render: (r) => formatBytes(r.storageUsedBytes) },
+    { label: "Storage Used", align: "right", render: (r) => <StorageUsedCell row={r} /> },
     { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
   ];
 
@@ -1041,7 +1068,7 @@ function SharePointView({ connectionId, selected, setSelected }: { connectionId:
   const columns: DiscoveryColumn<CleaningResourceRow>[] = [
     { label: "Site Name", render: (r) => r.name },
     { label: "Site URL", render: (r) => <span className="text-xs text-slate-500">{r.detail}</span> },
-    { label: "Storage Used", align: "right", render: (r) => formatBytes(r.storageUsedBytes) },
+    { label: "Storage Used", align: "right", render: (r) => <StorageUsedCell row={r} /> },
     { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
   ];
 
@@ -1088,7 +1115,16 @@ interface OutlookMailboxRow extends OutlookMailboxOverviewRow {
 
 /** A sub-resource's Graph-facing row, in the shape every selection Map already expects (see buildCleanupManifest). */
 function toSelectionRow(mailbox: OutlookMailboxRow, sub: OutlookOverviewSubResource): CleaningResourceRow {
-  return { id: sub.id, name: mailbox.name, detail: mailbox.upn, storageUsedBytes: 0, itemCount: sub.itemCount, status: sub.status };
+  return {
+    id: sub.id,
+    name: mailbox.name,
+    detail: mailbox.upn,
+    storageUsedBytes: 0,
+    itemCount: sub.itemCount,
+    status: sub.status,
+    lastSyncedAt: null,
+    pendingSyncAfterDelete: false,
+  };
 }
 
 /** A row counts as "fully selected" (drives the master checkbox) only when every sub-resource it actually has is selected — a mailbox with no synced Calendar yet doesn't block being "fully" selected on Mail+Contacts. */
