@@ -112,6 +112,14 @@ export function listSharedDrives(connectionId: string, opts: ListOpts = {}): Pro
   return rawFetch(`/api/cleaning/connections/${connectionId}/shared-drives?${toQuery(opts)}`);
 }
 
+export function listGmailMailboxes(connectionId: string, opts: ListOpts = {}): Promise<{ mailboxes: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/gmail?${toQuery(opts)}`);
+}
+
+export function listGoogleChatSpaces(connectionId: string, opts: ListOpts = {}): Promise<{ spaces: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
+  return rawFetch(`/api/cleaning/connections/${connectionId}/google-chat?${toQuery(opts)}`);
+}
+
 export function listSharePointSites(connectionId: string, opts: ListOpts = {}): Promise<{ sites: CleaningResourceRow[] } & PageResult<CleaningResourceRow>> {
   return rawFetch(`/api/cleaning/connections/${connectionId}/sharepoint?${toQuery(opts)}`);
 }
@@ -185,7 +193,9 @@ export type CleanupResourceType =
   | "channel"
   | "chat"
   | "google_my_drive_account"
-  | "shared_drive";
+  | "shared_drive"
+  | "gmail_mailbox"
+  | "google_chat_space";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 
@@ -200,6 +210,8 @@ export interface CleanupManifest {
   chats?: { connectionId: string; ids: string[] };
   googleMyDrive?: { connectionId: string; ids: string[] };
   sharedDrives?: { connectionId: string; ids: string[] };
+  gmail?: { connectionId: string; ids: string[] };
+  googleChat?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
@@ -214,6 +226,8 @@ export interface CleanupValidationResult {
     chats: number;
     googleMyDriveAccounts: number;
     sharedDrives: number;
+    gmailMailboxes: number;
+    googleChatSpaces: number;
   };
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
   errors: string[];
@@ -228,6 +242,8 @@ export interface CleanupValidationResult {
     chats: string[];
     googleMyDrive: string[];
     sharedDrives: string[];
+    gmail: string[];
+    googleChat: string[];
   };
 }
 

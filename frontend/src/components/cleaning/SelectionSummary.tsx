@@ -25,6 +25,10 @@ export interface SelectionTotals {
   googleMyDriveBytes: number;
   sharedDrives: number;
   sharedDrivesBytes: number;
+  gmailMailboxes: number;
+  /** Message count, not bytes — Gmail exposes no per-mailbox storage-bytes field at all (see backend/src/graph/gmailEnumeration.ts). */
+  gmailItems: number;
+  googleChatSpaces: number;
 }
 
 export function messagesFragment(selectedCount: number, knownCount: number, total: number): string {
@@ -43,7 +47,9 @@ export function hasSelection(t: SelectionTotals): boolean {
       t.teamsChannels +
       t.dms +
       t.googleMyDriveAccounts +
-      t.sharedDrives >
+      t.sharedDrives +
+      t.gmailMailboxes +
+      t.googleChatSpaces >
     0
   );
 }
@@ -70,6 +76,10 @@ export function SelectionSummary({ totals, onReview }: { totals: SelectionTotals
     parts.push(`${totals.googleMyDriveAccounts.toLocaleString()} Google My Drive account${totals.googleMyDriveAccounts === 1 ? "" : "s"} · ${formatBytes(totals.googleMyDriveBytes)}`);
   if (totals.sharedDrives > 0)
     parts.push(`${totals.sharedDrives.toLocaleString()} Shared Drive${totals.sharedDrives === 1 ? "" : "s"} · ${formatBytes(totals.sharedDrivesBytes)}`);
+  if (totals.gmailMailboxes > 0)
+    parts.push(`${totals.gmailMailboxes.toLocaleString()} Gmail mailbox${totals.gmailMailboxes === 1 ? "" : "es"} · ${totals.gmailItems.toLocaleString()} messages`);
+  if (totals.googleChatSpaces > 0)
+    parts.push(`${totals.googleChatSpaces.toLocaleString()} Chat space${totals.googleChatSpaces === 1 ? "" : "s"}`);
 
   return (
     // Fixed to the viewport, not sticky within the page's own scroll flow — a long discovery list

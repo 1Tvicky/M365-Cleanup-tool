@@ -20,8 +20,11 @@ import { runThrottled } from "../services/rateLimiter.js";
 import { connection as redis } from "./queue.js";
 import { classifyGoogleDeleteError } from "../graph/googleDriveDeletion.js";
 import { classifySharedDriveDeleteError } from "../graph/googleSharedDriveDeletion.js";
+import { classifyChatDeleteError } from "../graph/googleChatDeletion.js";
 import { executeGoogleMyDriveItem, isGoogleReauthCleanupError } from "./googleDriveCleanupExecution.js";
 import { executeSharedDriveItem } from "./googleSharedDriveCleanupExecution.js";
+import { executeGmailMailboxItem } from "./gmailCleanupExecution.js";
+import { executeGoogleChatSpaceItem } from "./googleChatCleanupExecution.js";
 
 /**
  * Mirrors jobs/cleaningScanWorker.ts's shape (same join-by-id pattern, same runThrottled usage,
@@ -68,8 +71,10 @@ export interface PendingItem {
     | "outlook_calendar"
     | "outlook_contacts"
     | "google_my_drive_account"
-    | "shared_drive";
-  graph_ref: { userId?: string; siteId?: string; userEmail?: string; driveId?: string };
+    | "shared_drive"
+    | "gmail_mailbox"
+    | "google_chat_space";
+  graph_ref: { userId?: string; siteId?: string; userEmail?: string; driveId?: string; spaceId?: string };
   /** This item's own connection's admin_upn — only populated/used for Google items where the impersonation subject isn't the item's own graph_ref (e.g. shared_drive, which has no owning user). */
   admin_upn?: string;
 }
@@ -326,10 +331,18 @@ export const cleanupExecutionWorker = new Worker(
       // admin, since a Shared Drive has no owning user).
       let execute: (item: PendingItem) => Promise<void>;
       if (isGoogle) {
-        execute = (item) =>
-          item.resource_type === "shared_drive"
-            ? executeSharedDriveItem(item.admin_upn!, item, operationId, permanent)
-            : executeGoogleMyDriveItem(item, operationId, permanent);
+        execute = (item) => {
+          switch (item.resource_type) {
+            case "shared_drive":
+              return executeSharedDriveItem(item.admin_upn!, item, operationId, permanent);
+            case "gmail_mailbox":
+              return executeGmailMailboxItem(item, operationId, permanent, () => isCancelled(operationId));
+            case "google_chat_space":
+              return executeGoogleChatSpaceItem(item.admin_upn!, item, operationId, permanent);
+            default:
+              return executeGoogleMyDriveItem(item, operationId, permanent);
+          }
+        };
       } else {
         const client = await graphClientForTenant(info.m365_tenant_id!);
         execute = (item) => executeAnyItem(client, item, operationId, permanent);
@@ -357,10 +370,12 @@ export const cleanupExecutionWorker = new Worker(
             );
           } else {
             failed++;
+            const googleClassifiers: Partial<Record<PendingItem["resource_type"], (err: unknown) => { code: string; message: string }>> = {
+              shared_drive: classifySharedDriveDeleteError,
+              google_chat_space: classifyChatDeleteError,
+            };
             const { code, message } = isGoogle
-              ? item.resource_type === "shared_drive"
-                ? classifySharedDriveDeleteError(result.error)
-                : classifyGoogleDeleteError(result.error)
+              ? (googleClassifiers[item.resource_type] ?? classifyGoogleDeleteError)(result.error)
               : classifyDeleteError(result.error);
             await query(
               `UPDATE cleanup_operation_items

@@ -40,6 +40,8 @@ const CATEGORY_LABEL: Record<string, string> = {
   chat: "Direct Messages",
   google_my_drive_account: "Google My Drive",
   shared_drive: "Google Shared Drives",
+  gmail_mailbox: "Gmail",
+  google_chat_space: "Google Chat",
 };
 
 const ITEM_STATUS_STYLE: Record<CleanupOperationItemRow["status"], { label: string; className: string }> = {
@@ -58,7 +60,7 @@ const ITEM_STATUS_STYLE: Record<CleanupOperationItemRow["status"], { label: stri
 // (graph/cleanupDeletion.ts) — Calendar/Contacts stay on plain soft delete regardless, so a
 // completed Calendar/Contacts item must always read as "Removed," never "Permanently Deleted," even
 // when the operator chose permanent deletion for the rest of the operation.
-const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox", "google_my_drive_account", "shared_drive"]);
+const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox", "google_my_drive_account", "shared_drive", "gmail_mailbox"]);
 
 function itemStatusLabel(item: { status: CleanupOperationItemRow["status"]; resourceType: CleanupResourceType }, deletionMode: CleanupDeletionMode): string {
   if (item.status === "completed" && deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";

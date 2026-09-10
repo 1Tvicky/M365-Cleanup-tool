@@ -296,6 +296,77 @@ cleaningRouter.get(
   })
 );
 
+/** GET /api/cleaning/connections/:id/gmail — Gmail Mailboxes table. Same reuse as google-my-drive above. */
+cleaningRouter.get(
+  "/connections/:id/gmail",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "gmail");
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, "gmail_mailbox", parsePageQuery(req));
+    res.json({ mailboxes: rows, total, page, pageSize });
+  })
+);
+
+/**
+ * Google Chat spaces read connection_google_spaces (migrations/015), not connection_users — its
+ * own dedicated query, same "no shared-Outlook-helper"-style reasoning as
+ * listOutlookCalendarSummaries below. storageUsedBytes is always 0 (not meaningful for Chat);
+ * itemCount is member_count here, not message_count — messageCount isn't computed at sync time
+ * (see jobs/googleChatSync.ts's comment), so surfacing member_count is the one number this table
+ * can show accurately without an expensive per-space enumeration pass.
+ */
+async function listChatSpaces(
+  connectionId: string,
+  opts: { search: string | null; sort: "storage" | "name"; page: number; pageSize: number }
+): Promise<PageResult<CleaningResourceRow>> {
+  const searchClause = `($2::text IS NULL OR display_name ILIKE '%' || $2 || '%')`;
+
+  const countResult = await query<{ count: string }>(
+    `SELECT COUNT(*) FROM connection_google_spaces WHERE connection_id = $1 AND ${searchClause}`,
+    [connectionId, opts.search]
+  );
+  const total = Number(countResult.rows[0]!.count);
+
+  const result = await query<{
+    id: string;
+    display_name: string | null;
+    space_id: string;
+    member_count: number;
+    sync_status: string;
+  }>(
+    `SELECT id, display_name, space_id, member_count, sync_status
+     FROM connection_google_spaces
+     WHERE connection_id = $1 AND ${searchClause}
+     ORDER BY ${opts.sort === "storage" ? "member_count DESC" : "COALESCE(display_name, space_id)"}, id
+     LIMIT $3 OFFSET $4`,
+    [connectionId, opts.search, opts.pageSize, (opts.page - 1) * opts.pageSize]
+  );
+
+  const rows: CleaningResourceRow[] = result.rows.map((r) => ({
+    id: r.id,
+    name: r.display_name ?? r.space_id,
+    detail: r.space_id,
+    storageUsedBytes: 0,
+    itemCount: r.member_count,
+    status: r.sync_status as CleaningResourceRow["status"],
+    lastSyncedAt: null,
+    // Chat message deletion is always effectively permanent (no trash/recycle alternative — see
+    // graph/googleChatDeletion.ts), so the deletion-recalc-lag hint doesn't apply here.
+    deletionRecalcHint: null,
+  }));
+
+  return { rows, total, page: opts.page, pageSize: opts.pageSize };
+}
+
+/** GET /api/cleaning/connections/:id/google-chat — Google Chat Spaces table. */
+cleaningRouter.get(
+  "/connections/:id/google-chat",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "google_chat");
+    const { rows, total, page, pageSize } = await listChatSpaces(req.params.id!, parsePageQuery(req));
+    res.json({ spaces: rows, total, page, pageSize });
+  })
+);
+
 /**
  * Reads connection_outlook_calendars — its own dedicated query, not a reuse/generalization of
  * listCleaningResources (which is hardcoded to connection_users), per the no-shared-Outlook-helper
@@ -750,6 +821,8 @@ async function resolveManifestTenant(manifest: CleanupManifest, operatorId: stri
         manifest.chats?.connectionId,
         manifest.googleMyDrive?.connectionId,
         manifest.sharedDrives?.connectionId,
+        manifest.gmail?.connectionId,
+        manifest.googleChat?.connectionId,
       ].filter((id): id is string => Boolean(id))
     ),
   ];
@@ -809,6 +882,8 @@ async function resolveManifestItems(
     chats: [],
     googleMyDrive: [],
     sharedDrives: [],
+    gmail: [],
+    googleChat: [],
   };
 
   if (manifest.oneDrive) {
@@ -1050,6 +1125,61 @@ async function resolveManifestItems(
     }
   }
 
+  // Gmail — same shape as googleMyDrive above, reusing connection_users (graph_user_id = the
+  // Directory user id, upn = their primary email, the impersonation subject for message access).
+  if (manifest.gmail) {
+    await requireConnectionAccess(manifest.gmail.connectionId, operatorId, "gmail");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string }>(
+      `SELECT id, display_name, upn FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.gmail.connectionId, manifest.gmail.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.gmail.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Gmail mailbox is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.gmail.connectionId,
+        resourceType: "gmail_mailbox",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        graphRef: { userEmail: row.upn },
+        supported: true,
+      });
+      foundIds.gmail.push(row.id);
+    }
+  }
+
+  // Google Chat — its own table (connection_google_spaces, migrations/015), not connection_users;
+  // graphRef is keyed spaceId, resolved to an impersonation target at execution time (a Space has
+  // no single owning user — see jobs/googleChatCleanupExecution.ts).
+  if (manifest.googleChat) {
+    await requireConnectionAccess(manifest.googleChat.connectionId, operatorId, "google_chat");
+    const result = await db.query<{ id: string; display_name: string | null; space_id: string }>(
+      `SELECT id, display_name, space_id FROM connection_google_spaces WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.googleChat.connectionId, manifest.googleChat.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.googleChat.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Google Chat space is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.googleChat.connectionId,
+        resourceType: "google_chat_space",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.space_id,
+        graphRef: { spaceId: row.space_id },
+        supported: true,
+      });
+      foundIds.googleChat.push(row.id);
+    }
+  }
+
   return { items, errors, foundIds };
 }
 
@@ -1062,6 +1192,8 @@ function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult[
     outlookContacts: items.filter((i) => i.resourceType === "outlook_contacts").length,
     googleMyDriveAccounts: items.filter((i) => i.resourceType === "google_my_drive_account").length,
     sharedDrives: items.filter((i) => i.resourceType === "shared_drive").length,
+    gmailMailboxes: items.filter((i) => i.resourceType === "gmail_mailbox").length,
+    googleChatSpaces: items.filter((i) => i.resourceType === "google_chat_space").length,
     channels: items.filter((i) => i.resourceType === "channel").length,
     chats: items.filter((i) => i.resourceType === "chat").length,
   };
@@ -1309,6 +1441,8 @@ const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   chat: "Direct message",
   google_my_drive_account: "Google My Drive account",
   shared_drive: "Google Shared Drive",
+  gmail_mailbox: "Gmail mailbox",
+  google_chat_space: "Google Chat space",
 };
 
 /** Matches an operation whose touched connections include one with a matching display_name — used by both the list and its count query, so the two never disagree on what "matches" means. */

@@ -5,6 +5,8 @@ import {
   getSyncOperation,
   getTeamsSummary,
   listCleaningConnections,
+  listGmailMailboxes,
+  listGoogleChatSpaces,
   listGoogleMyDriveAccounts,
   listOneDriveAccounts,
   listSharedDrives,
@@ -63,6 +65,8 @@ type View =
   | "outlook"
   | "google_my_drive"
   | "shared_drive"
+  | "gmail"
+  | "google_chat"
   | "review"
   | "cleanupConfirm"
   | "cleanupProgress"
@@ -76,7 +80,18 @@ type View =
  * deliberately doesn't touch the address bar at all — reloading mid-flow already falls back to
  * Landing today, and that isn't something this change is meant to fix.
  */
-const URL_SYNCED_VIEWS = new Set<View>(["landing", "dashboard", "onedrive", "sharepoint", "teams", "outlook", "google_my_drive", "shared_drive"]);
+const URL_SYNCED_VIEWS = new Set<View>([
+  "landing",
+  "dashboard",
+  "onedrive",
+  "sharepoint",
+  "teams",
+  "outlook",
+  "google_my_drive",
+  "shared_drive",
+  "gmail",
+  "google_chat",
+]);
 
 function cleaningUrlFor(view: View, activeGroup: TenantGroup | null): string {
   if (view === "landing" || !activeGroup) return "/cleaning";
@@ -134,7 +149,9 @@ function buildCleanupManifest(
   selectedChannels: Map<string, CleaningChannelRow>,
   selectedChats: Map<string, CleaningChatRow>,
   selectedGoogleMyDrive: Map<string, CleaningResourceRow>,
-  selectedSharedDrives: Map<string, CleaningResourceRow>
+  selectedSharedDrives: Map<string, CleaningResourceRow>,
+  selectedGmail: Map<string, CleaningResourceRow>,
+  selectedGoogleChat: Map<string, CleaningResourceRow>
 ): CleanupManifest {
   const manifest: CleanupManifest = {};
   if (selectedOneDrive.size > 0 && group.onedrive) manifest.oneDrive = { connectionId: group.onedrive.id, ids: [...selectedOneDrive.keys()] };
@@ -146,6 +163,8 @@ function buildCleanupManifest(
   if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
   if (selectedGoogleMyDrive.size > 0 && group.google_my_drive) manifest.googleMyDrive = { connectionId: group.google_my_drive.id, ids: [...selectedGoogleMyDrive.keys()] };
   if (selectedSharedDrives.size > 0 && group.shared_drive) manifest.sharedDrives = { connectionId: group.shared_drive.id, ids: [...selectedSharedDrives.keys()] };
+  if (selectedGmail.size > 0 && group.gmail) manifest.gmail = { connectionId: group.gmail.id, ids: [...selectedGmail.keys()] };
+  if (selectedGoogleChat.size > 0 && group.google_chat) manifest.googleChat = { connectionId: group.google_chat.id, ids: [...selectedGoogleChat.keys()] };
   return manifest;
 }
 
@@ -192,6 +211,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
   const [selectedGoogleMyDrive, setSelectedGoogleMyDrive] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedSharedDrives, setSelectedSharedDrives] = useState<Map<string, CleaningResourceRow>>(new Map());
+  const [selectedGmail, setSelectedGmail] = useState<Map<string, CleaningResourceRow>>(new Map());
+  const [selectedGoogleChat, setSelectedGoogleChat] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
   const [reconciliationBanner, setReconciliationBanner] = useState<string | null>(null);
 
@@ -265,7 +286,9 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedChannels,
       selectedChats,
       selectedGoogleMyDrive,
-      selectedSharedDrives
+      selectedSharedDrives,
+      selectedGmail,
+      selectedGoogleChat
     );
     try {
       const { foundIds } = await validateCleanup(manifest);
@@ -279,7 +302,9 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         (selectedChannels.size - foundIds.channels.length) +
         (selectedChats.size - foundIds.chats.length) +
         (selectedGoogleMyDrive.size - foundIds.googleMyDrive.length) +
-        (selectedSharedDrives.size - foundIds.sharedDrives.length);
+        (selectedSharedDrives.size - foundIds.sharedDrives.length) +
+        (selectedGmail.size - foundIds.gmail.length) +
+        (selectedGoogleChat.size - foundIds.googleChat.length);
       if (removedCount > 0) {
         setSelectedOneDrive((prev) => pruneToFound(prev, foundIds.oneDrive));
         setSelectedSharePoint((prev) => pruneToFound(prev, foundIds.sharePoint));
@@ -290,6 +315,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
         setSelectedGoogleMyDrive((prev) => pruneToFound(prev, foundIds.googleMyDrive));
         setSelectedSharedDrives((prev) => pruneToFound(prev, foundIds.sharedDrives));
+        setSelectedGmail((prev) => pruneToFound(prev, foundIds.gmail));
+        setSelectedGoogleChat((prev) => pruneToFound(prev, foundIds.googleChat));
         setReconciliationBanner(
           `${removedCount.toLocaleString()} selected item${removedCount === 1 ? " is" : "s are"} no longer available — your selection has been updated.`
         );
@@ -321,6 +348,9 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       googleMyDriveBytes: [...selectedGoogleMyDrive.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
       sharedDrives: selectedSharedDrives.size,
       sharedDrivesBytes: [...selectedSharedDrives.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
+      gmailMailboxes: selectedGmail.size,
+      gmailItems: [...selectedGmail.values()].reduce((s, r) => s + r.itemCount, 0),
+      googleChatSpaces: selectedGoogleChat.size,
     }),
     [
       selectedOneDrive,
@@ -332,6 +362,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedChats,
       selectedGoogleMyDrive,
       selectedSharedDrives,
+      selectedGmail,
+      selectedGoogleChat,
     ]
   );
 
@@ -347,6 +379,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     setSelectedChats(new Map());
     setSelectedGoogleMyDrive(new Map());
     setSelectedSharedDrives(new Map());
+    setSelectedGmail(new Map());
+    setSelectedGoogleChat(new Map());
     setActiveGroup(group);
     setView("dashboard");
   }
@@ -380,7 +414,9 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           selectedChannels,
           selectedChats,
           selectedGoogleMyDrive,
-          selectedSharedDrives
+          selectedSharedDrives,
+          selectedGmail,
+          selectedGoogleChat
         )}
         onBack={() => setView("review")}
         onStarted={(operationId) => {
@@ -419,6 +455,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           setSelectedChats(new Map());
           setSelectedGoogleMyDrive(new Map());
           setSelectedSharedDrives(new Map());
+          setSelectedGmail(new Map());
+          setSelectedGoogleChat(new Map());
           setCleanupOperationId(null);
           setView("dashboard");
         }}
@@ -434,7 +472,9 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       view === "outlook" ||
       view === "teams" ||
       view === "google_my_drive" ||
-      view === "shared_drive") &&
+      view === "shared_drive" ||
+      view === "gmail" ||
+      view === "google_chat") &&
     hasSelection(totals);
 
   return (
@@ -471,6 +511,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
               onOpenOutlook={() => setView("outlook")}
               onOpenGoogleMyDrive={() => setView("google_my_drive")}
               onOpenSharedDrives={() => setView("shared_drive")}
+              onOpenGmail={() => setView("gmail")}
+              onOpenGoogleChat={() => setView("google_chat")}
               onSyncFinished={handleSyncFinished}
             />
           </>
@@ -514,6 +556,14 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
 
         {view === "shared_drive" && activeGroup?.shared_drive && (
           <SharedDrivesView connectionId={activeGroup.shared_drive.id} selected={selectedSharedDrives} setSelected={setSelectedSharedDrives} />
+        )}
+
+        {view === "gmail" && activeGroup?.gmail && (
+          <GmailView connectionId={activeGroup.gmail.id} selected={selectedGmail} setSelected={setSelectedGmail} />
+        )}
+
+        {view === "google_chat" && activeGroup?.google_chat && (
+          <GoogleChatView connectionId={activeGroup.google_chat.id} selected={selectedGoogleChat} setSelected={setSelectedGoogleChat} />
         )}
       </div>
 
@@ -779,6 +829,8 @@ function Dashboard({
   onOpenOutlook,
   onOpenGoogleMyDrive,
   onOpenSharedDrives,
+  onOpenGmail,
+  onOpenGoogleChat,
   onSyncFinished,
 }: {
   group: TenantGroup;
@@ -788,6 +840,8 @@ function Dashboard({
   onOpenOutlook: () => void;
   onOpenGoogleMyDrive: () => void;
   onOpenSharedDrives: () => void;
+  onOpenGmail: () => void;
+  onOpenGoogleChat: () => void;
   onSyncFinished: () => void;
 }) {
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
@@ -798,6 +852,8 @@ function Dashboard({
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
   const [googleMyDriveTotals, setGoogleMyDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
   const [sharedDrivesTotals, setSharedDrivesTotals] = useState<{ count: number; bytes: number } | null>(null);
+  const [gmailTotals, setGmailTotals] = useState<{ count: number; items: number } | null>(null);
+  const [chatTotals, setChatTotals] = useState<{ count: number; members: number } | null>(null);
 
   const refreshTotals = useCallback(() => {
     if (group.onedrive) {
@@ -816,6 +872,16 @@ function Dashboard({
     if (group.shared_drive) {
       listSharedDrives(group.shared_drive.id, { sort: "storage", pageSize: 200 }).then(({ drives, total }) => {
         setSharedDrivesTotals({ count: total, bytes: drives.reduce((s, a) => s + a.storageUsedBytes, 0) });
+      });
+    }
+    if (group.gmail) {
+      listGmailMailboxes(group.gmail.id, { pageSize: 200 }).then(({ mailboxes, total }) => {
+        setGmailTotals({ count: total, items: mailboxes.reduce((s, m) => s + m.itemCount, 0) });
+      });
+    }
+    if (group.google_chat) {
+      listGoogleChatSpaces(group.google_chat.id, { pageSize: 200 }).then(({ spaces, total }) => {
+        setChatTotals({ count: total, members: spaces.reduce((s, sp) => s + sp.itemCount, 0) });
       });
     }
     if (group.sharepoint) {
@@ -1037,6 +1103,52 @@ function Dashboard({
           syncControl={
             group.shared_drive && <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>
           }
+        />
+        <ServiceCard
+          icon="✉️"
+          name="Gmail"
+          stats={
+            group.gmail ? (
+              gmailTotals ? (
+                <>
+                  <div>{gmailTotals.count.toLocaleString()}{gmailTotals.count > 0 ? "+" : ""} mailboxes</div>
+                  <div>{gmailTotals.items.toLocaleString()} messages</div>
+                </>
+              ) : (
+                <div className="italic text-slate-400">Loading…</div>
+              )
+            ) : (
+              <div className="text-slate-400">Not connected</div>
+            )
+          }
+          action="View Mailboxes"
+          onClick={onOpenGmail}
+          disabled={!group.gmail}
+          // Same deferred inline "Sync Now" shortcut as Google My Drive above — see that card's comment.
+          syncControl={group.gmail && <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>}
+        />
+        <ServiceCard
+          icon="💬"
+          name="Google Chat"
+          stats={
+            group.google_chat ? (
+              chatTotals ? (
+                <>
+                  <div>{chatTotals.count.toLocaleString()}{chatTotals.count > 0 ? "+" : ""} spaces</div>
+                  <div>{chatTotals.members.toLocaleString()} members</div>
+                </>
+              ) : (
+                <div className="italic text-slate-400">Loading…</div>
+              )
+            ) : (
+              <div className="text-slate-400">Not connected</div>
+            )
+          }
+          action="View Spaces"
+          onClick={onOpenGoogleChat}
+          disabled={!group.google_chat}
+          // Same deferred inline "Sync Now" shortcut as Google My Drive above — see that card's comment.
+          syncControl={group.google_chat && <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>}
         />
       </div>
     </div>
@@ -1306,6 +1418,107 @@ function SharedDrivesView({ connectionId, selected, setSelected }: { connectionI
           setSelected(next);
         }}
         emptyMessage="No Shared Drives found."
+      />
+    </div>
+  );
+}
+
+/** Same shape as GoogleMyDriveView/SharedDrivesView above — Gmail has no storage-bytes field at all (see graph/gmailEnumeration.ts), so there's no meaningful "Storage" sort to offer; itemCount here is a message count, not bytes. */
+function GmailView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
+  const [search, setSearch] = useState("");
+  const fetcher = useCallback(
+    (opts: { search?: string; page?: number; pageSize?: number }) =>
+      listGmailMailboxes(connectionId, opts).then((r) => ({ rows: r.mailboxes, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search);
+
+  const columns: DiscoveryColumn<CleaningResourceRow>[] = [
+    { label: "Mailbox", render: (r) => r.name },
+    { label: "Email", render: (r) => r.detail },
+    { label: "Messages", align: "right", render: (r) => r.itemCount.toLocaleString() },
+    { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
+  ];
+
+  return (
+    <div>
+      <h2 className="mb-1 text-lg font-semibold text-slate-800">Gmail</h2>
+      <p className="mb-5 text-sm text-slate-500">All Workspace mailboxes and their message counts</p>
+      <DiscoveryTable
+        title="Gmail Mailboxes"
+        columns={columns}
+        rows={rows}
+        loading={loading}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search mailboxes…"
+        selected={new Set(selected.keys())}
+        onToggle={(id) => {
+          const row = rows.find((r) => r.id === id);
+          if (row) toggleInMap(selected, setSelected, id, row);
+        }}
+        onToggleAll={() => {
+          const allSelected = rows.every((r) => selected.has(r.id));
+          const next = new Map(selected);
+          for (const r of rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
+          setSelected(next);
+        }}
+        emptyMessage="No Gmail mailboxes found."
+      />
+    </div>
+  );
+}
+
+/** Same shape as GmailView above — Google Chat spaces have no storage figure either, and member count (itemCount here) is the one number available without an expensive per-space enumeration pass at sync time (see routes/cleaning.ts's listChatSpaces). */
+function GoogleChatView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
+  const [search, setSearch] = useState("");
+  const fetcher = useCallback(
+    (opts: { search?: string; page?: number; pageSize?: number }) =>
+      listGoogleChatSpaces(connectionId, opts).then((r) => ({ rows: r.spaces, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search);
+
+  const columns: DiscoveryColumn<CleaningResourceRow>[] = [
+    { label: "Space Name", render: (r) => r.name },
+    { label: "Members", align: "right", render: (r) => r.itemCount.toLocaleString() },
+    { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
+  ];
+
+  return (
+    <div>
+      <h2 className="mb-1 text-lg font-semibold text-slate-800">Google Chat</h2>
+      <p className="mb-5 text-sm text-slate-500">All discovered Chat spaces — messages within a space are deleted permanently, with no recoverable alternative</p>
+      <DiscoveryTable
+        title="Google Chat Spaces"
+        columns={columns}
+        rows={rows}
+        loading={loading}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search spaces…"
+        selected={new Set(selected.keys())}
+        onToggle={(id) => {
+          const row = rows.find((r) => r.id === id);
+          if (row) toggleInMap(selected, setSelected, id, row);
+        }}
+        onToggleAll={() => {
+          const allSelected = rows.every((r) => selected.has(r.id));
+          const next = new Map(selected);
+          for (const r of rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
+          setSelected(next);
+        }}
+        emptyMessage="No Google Chat spaces found."
       />
     </div>
   );

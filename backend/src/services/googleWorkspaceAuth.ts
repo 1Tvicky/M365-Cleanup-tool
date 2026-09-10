@@ -78,10 +78,38 @@ export async function getDirectoryClientAs(adminEmail: string) {
   return google.admin({ version: "directory_v1", auth });
 }
 
-/** A Drive API client impersonating the given user — used for that user's own My Drive content. */
+/** A Drive API client impersonating the given user — used for that user's own My Drive content, and (with supportsAllDrives) Shared Drives. */
 export async function getDriveClientAs(userEmail: string) {
   const auth = await getImpersonatedClient(userEmail, DRIVE_SCOPES);
   return google.drive({ version: "v3", auth });
+}
+
+// Full mail scope only — https://mail.google.com/ is the only Gmail scope that supports deleting
+// messages (gmail.readonly/gmail.modify can list/label but not permanently delete or trash).
+const GMAIL_SCOPES = ["https://mail.google.com/"];
+
+/** A Gmail API client impersonating the given user — used for that user's own mailbox. */
+export async function getGmailClientAs(userEmail: string) {
+  const auth = await getImpersonatedClient(userEmail, GMAIL_SCOPES);
+  return google.gmail({ version: "v1", auth });
+}
+
+// Chat's admin-level space/membership enumeration and per-member message access are deliberately
+// separate scope sets (see graph/googleChatEnumeration.ts's header comment for why) — two distinct
+// impersonated-client helpers rather than one.
+const CHAT_ADMIN_SCOPES = ["https://www.googleapis.com/auth/chat.admin.spaces.readonly", "https://www.googleapis.com/auth/chat.admin.memberships.readonly"];
+const CHAT_MESSAGE_SCOPES = ["https://www.googleapis.com/auth/chat.messages"];
+
+/** A Chat API client impersonating the domain admin, with admin-level scopes — used to enumerate every space and space membership in the domain (spaces.search/members.list with useAdminAccess:true). Never used for message read/delete — see getChatClientAsMember. */
+export async function getChatAdminClientAs(adminEmail: string) {
+  const auth = await getImpersonatedClient(adminEmail, CHAT_ADMIN_SCOPES);
+  return google.chat({ version: "v1", auth });
+}
+
+/** A Chat API client impersonating one HUMAN member of a space — used to read/delete messages in that space. Chat's messages.list/messages.delete have no admin-access bypass (verified against the API docs): only a real member's own delegated auth can read/delete a space's messages, so cleanup must impersonate a member, not the admin. See jobs/googleChatCleanupExecution.ts for how the member is chosen. */
+export async function getChatClientAsMember(memberEmail: string) {
+  const auth = await getImpersonatedClient(memberEmail, CHAT_MESSAGE_SCOPES);
+  return google.chat({ version: "v1", auth });
 }
 
 export class GoogleDelegationError extends Error {}

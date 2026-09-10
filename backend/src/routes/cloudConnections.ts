@@ -10,9 +10,10 @@ import { consumeConnectAttempt, InvalidOAuthStateError, startConnectAttempt } fr
 import { encryptToken } from "../services/tokenEncryption.js";
 import { enqueueCloudSyncJob } from "../jobs/queue.js";
 import { getSiteById, getTeamById, getUserById, listAllTeams, listAllUsers, searchSites } from "../graph/cloudEnumeration.js";
-import { getDirectoryClientAs, getDriveClientAs } from "../services/googleWorkspaceAuth.js";
+import { getChatAdminClientAs, getDirectoryClientAs, getDriveClientAs } from "../services/googleWorkspaceAuth.js";
 import { getGoogleUserById, listDomainUsers } from "../graph/googleDriveEnumeration.js";
 import { getSharedDriveById, listAllSharedDrives } from "../graph/googleSharedDriveEnumeration.js";
+import { getChatSpaceById, listAllChatSpaces } from "../graph/googleChatEnumeration.js";
 import { ApiError } from "../types/index.js";
 import {
   CLOUD_TYPES,
@@ -68,7 +69,7 @@ interface WorkloadIdentity {
  * can't be pointed at the wrong endpoint by a client.
  */
 async function listWorkloadResources(identity: WorkloadIdentity): Promise<AvailableResourceRow[]> {
-  if (identity.cloudType === "google_my_drive") {
+  if (identity.cloudType === "google_my_drive" || identity.cloudType === "gmail") {
     const directory = await getDirectoryClientAs(identity.adminUpn);
     const domain = identity.adminUpn.split("@")[1]!;
     const users = await listDomainUsers(directory, domain);
@@ -78,6 +79,11 @@ async function listWorkloadResources(identity: WorkloadIdentity): Promise<Availa
     const drive = await getDriveClientAs(identity.adminUpn);
     const drives = await listAllSharedDrives(drive);
     return drives.map((d) => ({ id: d.id, displayName: d.name }));
+  }
+  if (identity.cloudType === "google_chat") {
+    const chat = await getChatAdminClientAs(identity.adminUpn);
+    const spaces = await listAllChatSpaces(chat);
+    return spaces.map((s) => ({ id: s.id, displayName: s.displayName ?? s.id }));
   }
   const client = await graphClientForTenant(identity.m365TenantId!);
   if (identity.cloudType === "sharepoint") {
@@ -100,7 +106,7 @@ async function listWorkloadResources(identity: WorkloadIdentity): Promise<Availa
  * resource-level sync feature exists to eliminate.
  */
 async function getWorkloadResourceById(identity: WorkloadIdentity, id: string): Promise<AvailableResourceRow | null> {
-  if (identity.cloudType === "google_my_drive") {
+  if (identity.cloudType === "google_my_drive" || identity.cloudType === "gmail") {
     const directory = await getDirectoryClientAs(identity.adminUpn);
     const user = await getGoogleUserById(directory, id);
     return user ? { id: user.id, displayName: user.displayName ?? user.email, secondary: user.email } : null;
@@ -109,6 +115,11 @@ async function getWorkloadResourceById(identity: WorkloadIdentity, id: string): 
     const drive = await getDriveClientAs(identity.adminUpn);
     const found = await getSharedDriveById(drive, id);
     return found ? { id: found.id, displayName: found.name } : null;
+  }
+  if (identity.cloudType === "google_chat") {
+    const chat = await getChatAdminClientAs(identity.adminUpn);
+    const found = await getChatSpaceById(chat, id);
+    return found ? { id: found.id, displayName: found.displayName ?? found.id } : null;
   }
   const client = await graphClientForTenant(identity.m365TenantId!);
   if (identity.cloudType === "sharepoint") {

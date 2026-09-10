@@ -20,6 +20,8 @@ import { cloudProvider, type CloudType } from "../types/connections.js";
 import { connection as redis } from "./queue.js";
 import { isGoogleReauthError, listAllGoogleDomainUsers, syncGoogleMyDrive } from "./googleDriveSync.js";
 import { listAllSharedDrivesForAdmin, syncSharedDrives } from "./googleSharedDriveSync.js";
+import { listAllChatSpacesForAdmin, syncGoogleChatSpaces } from "./googleChatSync.js";
+import { syncGmail } from "./gmailSync.js";
 
 /**
  * Maps a resource's own Graph id (user id / site id / team id) to its sync_job_resources.id, for a
@@ -530,32 +532,67 @@ export const cloudSyncWorker = new Worker(
     try {
       let failed = 0;
 
-      if (info.cloud_type === "google_my_drive" || info.cloud_type === "shared_drive") {
-        // Google's per-item impersonated-client model (built inside syncGoogleMyDrive's/
-        // syncSharedDrives's own runThrottled callback) means there's no single shared client to
-        // build here, unlike every M365 branch below.
-        if (info.cloud_type === "shared_drive") {
-          if (isScoped) {
-            const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
-            await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
-            const drives = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, name: r.display_name }));
-            failed = await syncSharedDrives(info.admin_upn, info.connection_id, syncJobId, drives, resourceRows);
-          } else {
-            const drives = await listAllSharedDrivesForAdmin(info.admin_upn);
-            await pruneStaleConnectionUsers(info.connection_id, drives.map((d) => d.id));
-            await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, drives.length]);
-            failed = await syncSharedDrives(info.admin_upn, info.connection_id, syncJobId, drives, null);
+      if (cloudProvider(info.cloud_type) === "google") {
+        // Google's per-item impersonated-client model (built inside each sync* function's own
+        // runThrottled callback) means there's no single shared client to build here, unlike every
+        // M365 branch below. Each Google cloud_type has its own resource shape/table, so this
+        // dispatches on cloud_type once per branch rather than trying to force a shared shape.
+        switch (info.cloud_type) {
+          case "shared_drive": {
+            if (isScoped) {
+              const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+              const drives = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, name: r.display_name }));
+              failed = await syncSharedDrives(info.admin_upn, info.connection_id, syncJobId, drives, resourceRows);
+            } else {
+              const drives = await listAllSharedDrivesForAdmin(info.admin_upn);
+              await pruneStaleConnectionUsers(info.connection_id, drives.map((d) => d.id));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, drives.length]);
+              failed = await syncSharedDrives(info.admin_upn, info.connection_id, syncJobId, drives, null);
+            }
+            break;
           }
-        } else if (isScoped) {
-          const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
-          await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
-          const users = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, email: r.secondary ?? "", displayName: r.display_name }));
-          failed = await syncGoogleMyDrive(info.connection_id, syncJobId, users, resourceRows);
-        } else {
-          const users = await listAllGoogleDomainUsers(info.admin_upn);
-          await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
-          await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
-          failed = await syncGoogleMyDrive(info.connection_id, syncJobId, users, null);
+          case "google_chat": {
+            if (isScoped) {
+              const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+              const spaces = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, displayName: r.display_name }));
+              failed = await syncGoogleChatSpaces(info.admin_upn, info.connection_id, syncJobId, spaces, resourceRows);
+            } else {
+              const spaces = await listAllChatSpacesForAdmin(info.admin_upn);
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, spaces.length]);
+              failed = await syncGoogleChatSpaces(info.admin_upn, info.connection_id, syncJobId, spaces, null);
+            }
+            break;
+          }
+          case "gmail": {
+            if (isScoped) {
+              const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+              const users = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, email: r.secondary ?? "", displayName: r.display_name }));
+              failed = await syncGmail(info.connection_id, syncJobId, users, resourceRows);
+            } else {
+              const users = await listAllGoogleDomainUsers(info.admin_upn);
+              await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
+              failed = await syncGmail(info.connection_id, syncJobId, users, null);
+            }
+            break;
+          }
+          default: {
+            // google_my_drive
+            if (isScoped) {
+              const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+              const users = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, email: r.secondary ?? "", displayName: r.display_name }));
+              failed = await syncGoogleMyDrive(info.connection_id, syncJobId, users, resourceRows);
+            } else {
+              const users = await listAllGoogleDomainUsers(info.admin_upn);
+              await pruneStaleConnectionUsers(info.connection_id, users.map((u) => u.id));
+              await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, users.length]);
+              failed = await syncGoogleMyDrive(info.connection_id, syncJobId, users, null);
+            }
+          }
         }
 
         const cancelled = await isCancelled(syncJobId);

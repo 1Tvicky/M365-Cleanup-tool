@@ -30,6 +30,8 @@ const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   chat: "Direct message conversation",
   google_my_drive_account: "Google My Drive account",
   shared_drive: "Google Shared Drive",
+  gmail_mailbox: "Gmail mailbox",
+  google_chat_space: "Google Chat space",
 };
 
 /**
