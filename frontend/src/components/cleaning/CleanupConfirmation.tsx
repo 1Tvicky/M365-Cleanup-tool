@@ -16,6 +16,7 @@ function selectedCloudNames(summary: CleanupValidationResult["summary"]): string
   if (summary.sharePointSites > 0) names.push("SharePoint");
   if (summary.outlookMailboxes > 0 || summary.outlookCalendars > 0 || summary.outlookContacts > 0) names.push("Outlook");
   if (summary.googleMyDriveAccounts > 0) names.push("Google My Drive");
+  if (summary.sharedDrives > 0) names.push("Google Shared Drives");
   return names.length > 0 ? names.join(" and ") : "Microsoft 365";
 }
 
@@ -28,6 +29,7 @@ const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   channel: "Teams channel",
   chat: "Direct message conversation",
   google_my_drive_account: "Google My Drive account",
+  shared_drive: "Google Shared Drive",
 };
 
 /**
@@ -81,7 +83,11 @@ export function CleanupConfirmation({
   }
 
   const executableCount = result
-    ? result.summary.oneDriveAccounts + result.summary.sharePointSites + result.summary.outlookMailboxes + result.summary.googleMyDriveAccounts
+    ? result.summary.oneDriveAccounts +
+      result.summary.sharePointSites +
+      result.summary.outlookMailboxes +
+      result.summary.googleMyDriveAccounts +
+      result.summary.sharedDrives
     : 0;
 
   return (
@@ -129,6 +135,12 @@ export function CleanupConfirmation({
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <span className="text-sm font-medium text-slate-700">Google My Drive Accounts</span>
                 <span className="text-sm text-slate-600">{result.summary.googleMyDriveAccounts.toLocaleString()}</span>
+              </div>
+            )}
+            {result.summary.sharedDrives > 0 && (
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-medium text-slate-700">Google Shared Drives</span>
+                <span className="text-sm text-slate-600">{result.summary.sharedDrives.toLocaleString()}</span>
               </div>
             )}
             {executableCount === 0 && (

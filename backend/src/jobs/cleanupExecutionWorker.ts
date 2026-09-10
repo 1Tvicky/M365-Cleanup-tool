@@ -19,7 +19,9 @@ import {
 import { runThrottled } from "../services/rateLimiter.js";
 import { connection as redis } from "./queue.js";
 import { classifyGoogleDeleteError } from "../graph/googleDriveDeletion.js";
+import { classifySharedDriveDeleteError } from "../graph/googleSharedDriveDeletion.js";
 import { executeGoogleMyDriveItem, isGoogleReauthCleanupError } from "./googleDriveCleanupExecution.js";
+import { executeSharedDriveItem } from "./googleSharedDriveCleanupExecution.js";
 
 /**
  * Mirrors jobs/cleaningScanWorker.ts's shape (same join-by-id pattern, same runThrottled usage,
@@ -59,8 +61,17 @@ async function isCancelled(operationId: string): Promise<boolean> {
 export interface PendingItem {
   id: string;
   connection_id: string;
-  resource_type: "onedrive_account" | "sharepoint_site" | "outlook_mailbox" | "outlook_calendar" | "outlook_contacts" | "google_my_drive_account";
-  graph_ref: { userId?: string; siteId?: string; userEmail?: string };
+  resource_type:
+    | "onedrive_account"
+    | "sharepoint_site"
+    | "outlook_mailbox"
+    | "outlook_calendar"
+    | "outlook_contacts"
+    | "google_my_drive_account"
+    | "shared_drive";
+  graph_ref: { userId?: string; siteId?: string; userEmail?: string; driveId?: string };
+  /** This item's own connection's admin_upn — only populated/used for Google items where the impersonation subject isn't the item's own graph_ref (e.g. shared_drive, which has no owning user). */
+  admin_upn?: string;
 }
 
 /** Deletes every top-level file/folder inside the account's OneDrive or the site's default document library. Never touches the account or site itself. */
@@ -284,9 +295,10 @@ export const cleanupExecutionWorker = new Worker(
     const permanent = info.deletion_mode === "permanent";
 
     const pending = await query<PendingItem>(
-      `SELECT id, connection_id, resource_type, graph_ref
-       FROM cleanup_operation_items
-       WHERE cleanup_operation_id = $1 AND status = 'pending'`,
+      `SELECT coi.id, coi.connection_id, coi.resource_type, coi.graph_ref, c.admin_upn
+       FROM cleanup_operation_items coi
+       JOIN connections c ON c.id = coi.connection_id
+       WHERE coi.cleanup_operation_id = $1 AND coi.status = 'pending'`,
       [operationId]
     );
 
@@ -305,13 +317,19 @@ export const cleanupExecutionWorker = new Worker(
       let failed = 0;
 
       // Every item in one cleanup_operations row belongs to exactly one tenant, and every tenant is
-      // exactly one vendor (M365 xor Google — see migrations/014_google_my_drive.sql), so this
-      // branches once per job, not per item. Google needs no single shared client the way Graph
-      // does — executeGoogleMyDriveItem builds its own per-item impersonated client from the item's
-      // own graph_ref.userEmail.
+      // exactly one vendor (M365 xor Google — see migrations/014_google_my_drive.sql) — but a
+      // Google tenant can still mix google_my_drive_account and shared_drive items in one
+      // operation (the same way an M365 tenant already mixes OneDrive/SharePoint/Outlook), so the
+      // Google side dispatches per item's own resource_type, not once for the whole job. Neither
+      // Google path shares a single client the way Graph does — each builds its own impersonated
+      // client per item (My Drive: the item's own user; Shared Drives: the item's connection's
+      // admin, since a Shared Drive has no owning user).
       let execute: (item: PendingItem) => Promise<void>;
       if (isGoogle) {
-        execute = (item) => executeGoogleMyDriveItem(item, operationId, permanent);
+        execute = (item) =>
+          item.resource_type === "shared_drive"
+            ? executeSharedDriveItem(item.admin_upn!, item, operationId, permanent)
+            : executeGoogleMyDriveItem(item, operationId, permanent);
       } else {
         const client = await graphClientForTenant(info.m365_tenant_id!);
         execute = (item) => executeAnyItem(client, item, operationId, permanent);
@@ -339,7 +357,11 @@ export const cleanupExecutionWorker = new Worker(
             );
           } else {
             failed++;
-            const { code, message } = isGoogle ? classifyGoogleDeleteError(result.error) : classifyDeleteError(result.error);
+            const { code, message } = isGoogle
+              ? item.resource_type === "shared_drive"
+                ? classifySharedDriveDeleteError(result.error)
+                : classifyGoogleDeleteError(result.error)
+              : classifyDeleteError(result.error);
             await query(
               `UPDATE cleanup_operation_items
                SET status = 'failed', attempts = attempts + 1, completed_at = now(), updated_at = now(), error_code = $2, error_message = $3

@@ -10,7 +10,7 @@ import { discoveryRouter } from "./routes/discovery.js";
 import { cleanupRouter } from "./routes/cleanup.js";
 import { jobsRouter } from "./routes/jobs.js";
 import { cloudConnectionsRouter, m365ConnectCallbackRouter } from "./routes/cloudConnections.js";
-import { googleConnectionsRouter } from "./routes/googleConnections.js";
+import { googleConnectCallbackRouter, googleConnectionsRouter } from "./routes/googleConnections.js";
 import { cleaningRouter } from "./routes/cleaning.js";
 import { ApiError } from "./types/index.js";
 
@@ -46,11 +46,12 @@ app.use("/api/v1", jobsRouter); // mounts /jobs/* and /tenants/:tenantId/{jobs,r
 app.use("/api/clouds", cloudConnectionsRouter);
 app.use("/api/auth/m365/callback", m365ConnectCallbackRouter);
 
-// Google Workspace connect flow — its own namespace since the flow shape is fundamentally
-// different (no OAuth redirect/callback; domain-wide delegation is granted out-of-band in the
-// customer's own Admin Console, this route only verifies it). Every OTHER Google My Drive route
-// (available-resources, resync, status, disconnect) reuses cloudConnectionsRouter above unchanged.
+// Google Workspace connect flow — its own namespace (own OAuth client/redirect URI), but the same
+// popup shape as the M365 flow above. The callback path below must match this Google Cloud OAuth
+// client's registered redirect URI exactly. Every OTHER Google route (available-resources, resync,
+// status, disconnect) reuses cloudConnectionsRouter above unchanged.
 app.use("/api/google-clouds", googleConnectionsRouter);
+app.use("/api/auth/google-workspace/callback", googleConnectCallbackRouter);
 
 // Cleaning module (discovery phase) — read-only, reuses connections/tenant_roles from the layer
 // above. Same reasoning for living outside /api/v1: its own contract, its own namespace.

@@ -69,15 +69,27 @@ export const config = {
 
   // Our own dedicated Google Cloud service account for domain-wide delegation into customer
   // Workspace domains (My Drive / Shared Drives / Chat / Gmail) — one service account, owned by
-  // us, never a customer's. Deliberately NOT oauth.google below, which is an unrelated feature
-  // (operator "Sign in with Google" SSO login) — reusing those credentials here would either
-  // collide with that login flow or force sharing one OAuth client across two very different
-  // purposes/scopes. See docs/google-workspace-integration.md.
+  // us, never a customer's. This is what actually reads/deletes each user's data, authorized by
+  // the customer's Workspace super-admin once in their own Admin Console. Deliberately NOT
+  // oauth.google below (operator SSO login) or googleWorkspaceOAuth below (the Add Cloud identity
+  // popup) — three separate credentials for three unrelated purposes. See
+  // docs/google-workspace-integration.md.
   googleWorkspace: {
     // A downloaded service-account JSON key file path (local dev) or the key's JSON content inline
     // (prod, typically injected by a secrets manager) — exactly one should be set.
     serviceAccountKeyPath: process.env.GOOGLE_WORKSPACE_SERVICE_ACCOUNT_KEY_PATH ?? "",
     serviceAccountKeyJson: process.env.GOOGLE_WORKSPACE_SERVICE_ACCOUNT_KEY_JSON ?? "",
+  },
+
+  // A separate Google Cloud OAuth 2.0 client (NOT the service account above, NOT oauth.google
+  // below) used only for the Add Cloud popup's identity step — confirms which admin/domain is
+  // connecting, mirroring microsoft.connectRedirectUri's delegated-identity-only role. Requests
+  // only openid/email/profile, never Drive/Directory scopes — actual data access always goes
+  // through the service account above, once domain-wide delegation is verified.
+  googleWorkspaceOAuth: {
+    clientId: process.env.GOOGLE_WORKSPACE_OAUTH_CLIENT_ID ?? "",
+    clientSecret: process.env.GOOGLE_WORKSPACE_OAUTH_CLIENT_SECRET ?? "",
+    redirectUri: process.env.GOOGLE_WORKSPACE_OAUTH_REDIRECT_URI ?? "",
   },
 
   oauth: {

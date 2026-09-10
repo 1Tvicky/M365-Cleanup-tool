@@ -13,7 +13,7 @@ import {
 import { ApiClientError } from "../../api/client";
 import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../cleaning/DiscoveryTable";
 import { Spinner } from "../cleaning/ItemFilesDrilldown";
-import { GoogleIcon, OneDriveIcon, OutlookIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
+import { GmailIcon, GoogleChatIcon, GoogleIcon, OneDriveIcon, OutlookIcon, SharedDrivesIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 import type { Workload } from "../../types";
 import { formatBytes } from "../../utils/format";
 
@@ -25,6 +25,9 @@ const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = 
   teams: TeamsIcon,
   outlook: OutlookIcon,
   google_my_drive: GoogleIcon,
+  shared_drive: SharedDrivesIcon,
+  google_chat: GoogleChatIcon,
+  gmail: GmailIcon,
 };
 
 const CLOUD_LABELS: Record<Workload, string> = {
@@ -33,19 +36,27 @@ const CLOUD_LABELS: Record<Workload, string> = {
   teams: "Microsoft Teams",
   outlook: "Outlook",
   google_my_drive: "Google My Drive",
+  shared_drive: "Shared Drives",
+  google_chat: "Google Chat",
+  gmail: "Gmail",
 };
 
 // SharePoint enumerates sites, not people — a tenant with a hundred users can easily have a
 // thousand+ sites (one per team/group, communication sites, hub sites, etc.), so labeling that
 // count "Users" the same way OneDrive does is misleading, not just cosmetically wrong. Teams synced
 // to mean actual Teams (not per-user joined-team counts — see migrations/012_sync_job_resources.sql)
-// for the same reason: "Users" would now be wrong there too.
+// for the same reason: "Users" would now be wrong there too. Shared Drives enumerates drives, not
+// people, for the same reason SharePoint does; Chat enumerates spaces; Gmail enumerates mailboxes
+// (one per user, same granularity as OneDrive/Outlook).
 const UNIT_LABELS: Record<Workload, { singular: string; plural: string }> = {
   onedrive: { singular: "User", plural: "Users" },
   teams: { singular: "Team", plural: "Teams" },
   sharepoint: { singular: "Site", plural: "Sites" },
   outlook: { singular: "Mailbox", plural: "Mailboxes" },
   google_my_drive: { singular: "User", plural: "Users" },
+  shared_drive: { singular: "Shared Drive", plural: "Shared Drives" },
+  google_chat: { singular: "Space", plural: "Spaces" },
+  gmail: { singular: "Mailbox", plural: "Mailboxes" },
 };
 
 // The secondary identifier shown alongside a resource's name in the Sync Resources picker — null
@@ -55,6 +66,9 @@ const SECONDARY_COLUMN_LABEL: Record<Workload, string | null> = {
   outlook: "Email",
   sharepoint: "URL",
   teams: null,
+  shared_drive: null,
+  google_chat: null,
+  gmail: "Email",
   google_my_drive: "Email",
 };
 

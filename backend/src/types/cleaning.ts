@@ -98,7 +98,9 @@ export type CleanupResourceType =
   | "channel"
   | "chat"
   /** Google Workspace My Drive — a user's root Drive content, deleted via domain-wide delegation impersonating them. Same "select a user, delete their root-level content, never the account itself" granularity as onedrive_account. */
-  | "google_my_drive_account";
+  | "google_my_drive_account"
+  /** Google Shared Drive — the drive's top-level content, deleted via an admin-impersonated client (a Shared Drive has no owning user). Never deletes the Shared Drive itself — see graph/googleSharedDriveDeletion.ts. */
+  | "shared_drive";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 /** Chosen by the operator on the confirmation screen — see migrations/013_cleanup_deletion_mode.sql. Only OneDrive/SharePoint/Outlook-mail items ever consult this; Teams/Calendar/Contacts are unaffected either way. */
@@ -114,6 +116,7 @@ export interface CleanupManifest {
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
   googleMyDrive?: { connectionId: string; ids: string[] };
+  sharedDrives?: { connectionId: string; ids: string[] };
 }
 
 export interface CleanupValidationResult {
@@ -127,6 +130,7 @@ export interface CleanupValidationResult {
     channels: number;
     chats: number;
     googleMyDriveAccounts: number;
+    sharedDrives: number;
   };
   /** Selected items that can never be executed under this app's Graph permissions — reported here, not in errors, since selecting them isn't invalid, just not actionable yet. */
   unsupported: { resourceType: CleanupResourceType; displayName: string }[];
@@ -141,6 +145,7 @@ export interface CleanupValidationResult {
     channels: string[];
     chats: string[];
     googleMyDrive: string[];
+    sharedDrives: string[];
   };
 }
 

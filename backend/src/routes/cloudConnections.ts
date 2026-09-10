@@ -10,8 +10,9 @@ import { consumeConnectAttempt, InvalidOAuthStateError, startConnectAttempt } fr
 import { encryptToken } from "../services/tokenEncryption.js";
 import { enqueueCloudSyncJob } from "../jobs/queue.js";
 import { getSiteById, getTeamById, getUserById, listAllTeams, listAllUsers, searchSites } from "../graph/cloudEnumeration.js";
-import { getDirectoryClientAs } from "../services/googleWorkspaceAuth.js";
+import { getDirectoryClientAs, getDriveClientAs } from "../services/googleWorkspaceAuth.js";
 import { getGoogleUserById, listDomainUsers } from "../graph/googleDriveEnumeration.js";
+import { getSharedDriveById, listAllSharedDrives } from "../graph/googleSharedDriveEnumeration.js";
 import { ApiError } from "../types/index.js";
 import {
   CLOUD_TYPES,
@@ -73,6 +74,11 @@ async function listWorkloadResources(identity: WorkloadIdentity): Promise<Availa
     const users = await listDomainUsers(directory, domain);
     return users.map((u) => ({ id: u.id, displayName: u.displayName ?? u.email, secondary: u.email }));
   }
+  if (identity.cloudType === "shared_drive") {
+    const drive = await getDriveClientAs(identity.adminUpn);
+    const drives = await listAllSharedDrives(drive);
+    return drives.map((d) => ({ id: d.id, displayName: d.name }));
+  }
   const client = await graphClientForTenant(identity.m365TenantId!);
   if (identity.cloudType === "sharepoint") {
     const sites = await searchSites(client);
@@ -98,6 +104,11 @@ async function getWorkloadResourceById(identity: WorkloadIdentity, id: string): 
     const directory = await getDirectoryClientAs(identity.adminUpn);
     const user = await getGoogleUserById(directory, id);
     return user ? { id: user.id, displayName: user.displayName ?? user.email, secondary: user.email } : null;
+  }
+  if (identity.cloudType === "shared_drive") {
+    const drive = await getDriveClientAs(identity.adminUpn);
+    const found = await getSharedDriveById(drive, id);
+    return found ? { id: found.id, displayName: found.name } : null;
   }
   const client = await graphClientForTenant(identity.m365TenantId!);
   if (identity.cloudType === "sharepoint") {
@@ -615,7 +626,13 @@ export const m365ConnectCallbackRouter = Router();
  * failure throws or logs anything, which is why it looked like "it connected but the popup just
  * sits there and Manage Clouds never updates." Override to unsafe-none for this one route only.
  */
-m365ConnectCallbackRouter.use((_req, res, next) => {
+/**
+ * Exported so routes/googleConnections.ts's own callback router can apply the exact same
+ * COOP-unsafe-none + per-request-nonce CSP override — both popup flows are self-contained inline
+ * HTML pages with the same window.opener/postMessage/window.close() requirements. See the inline
+ * comment below for why each header is needed.
+ */
+export function popupCallbackHeaders(_req: unknown, res: import("express").Response, next: () => void): void {
   res.setHeader("Cross-Origin-Opener-Policy", "unsafe-none");
   // helmet()'s default CSP (app.ts) is script-src 'self', which blocks inline <script> tags
   // outright with no exception — silently, no visible error, which is exactly why the postMessage
@@ -629,17 +646,22 @@ m365ConnectCallbackRouter.use((_req, res, next) => {
     `default-src 'none'; script-src 'nonce-${res.locals.cspNonce}'; style-src 'unsafe-inline'; base-uri 'none'; frame-ancestors 'self'`
   );
   next();
-});
+}
 
-// Only ever rendered by the M365 popup HTML below — google_my_drive never reaches this popup flow
-// (see routes/googleConnections.ts's connect/verify route, no redirect/callback involved), but the
-// entry is still required so this stays a total Record<CloudType, string>.
-const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
+m365ConnectCallbackRouter.use(popupCallbackHeaders);
+
+// Shared by both the M365 popup flow below and routes/googleConnections.ts's Google popup flow
+// (which imports popupResultPage/popupProgressPage/CLOUD_TYPE_LABELS from this file rather than
+// duplicating this HTML) — every cloud type's popup renders through these two functions.
+export const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
   onedrive: "OneDrive for Business",
   sharepoint: "SharePoint Online",
   teams: "Microsoft Teams",
   outlook: "Outlook",
   google_my_drive: "Google My Drive",
+  shared_drive: "Shared Drives",
+  google_chat: "Google Chat",
+  gmail: "Gmail",
 };
 
 /**
@@ -648,7 +670,7 @@ const CLOUD_TYPE_LABELS: Record<CloudType, string> = {
  * shows a brief branded success/error confirmation instead of an instant silent close, then
  * posts the result to the opener and closes itself.
  */
-function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: CloudType | null; reason?: string; nonce: string }): string {
+export function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: CloudType | null; reason?: string; nonce: string }): string {
   const label = opts.cloudType ? CLOUD_TYPE_LABELS[opts.cloudType] : "your cloud";
   const message = opts.ok
     ? `Your ${label} account has been connected!`
@@ -690,7 +712,7 @@ function popupResultPage(opts: { payload: unknown; ok: boolean; cloudType: Cloud
  * status (same-origin, same browser — the operator's session cookie is sent automatically) instead
  * of re-deriving progress some other way.
  */
-function popupProgressPage(opts: { connectionId: string; cloudType: CloudType; payload: unknown; nonce: string }): string {
+export function popupProgressPage(opts: { connectionId: string; cloudType: CloudType; payload: unknown; nonce: string }): string {
   const label = CLOUD_TYPE_LABELS[opts.cloudType];
   const payloadJson = JSON.stringify(opts.payload).replace(/</g, "\\u003c");
   const connectionIdJson = JSON.stringify(opts.connectionId).replace(/</g, "\\u003c");

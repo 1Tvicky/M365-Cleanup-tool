@@ -1,6 +1,6 @@
 import { rawFetch } from "./client";
 
-export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook" | "google_my_drive";
+export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook" | "google_my_drive" | "shared_drive" | "google_chat" | "gmail";
 export type ConnectionStatus = "connecting" | "active" | "error" | "needs_reauth" | "disconnected";
 
 export interface ManageCloudsRow {
@@ -65,6 +65,10 @@ export type M365ConnectMessage =
   | { type: "m365-connect-complete"; status: "success"; connectionId: string; cloudType: CloudType }
   | { type: "m365-connect-complete"; status: "error"; cloudType: CloudType | null; reason: string };
 
+export type GoogleConnectMessage =
+  | { type: "google-connect-complete"; status: "success"; connectionId: string; cloudType: CloudType }
+  | { type: "google-connect-complete"; status: "error"; cloudType: CloudType | null; reason: string };
+
 export function listManageClouds(): Promise<{ connections: ManageCloudsRow[] }> {
   return rawFetch("/api/clouds/manage");
 }
@@ -91,17 +95,14 @@ export function initCloudConnect(cloudType: CloudType): Promise<{ authorizeUrl: 
 }
 
 /**
- * Google Workspace's connect action — deliberately not a popup/redirect like initCloudConnect
- * above: domain-wide delegation is granted out-of-band by the customer's own Workspace super-admin
- * in their Admin Console before this call, so this just verifies that grant and returns a
- * connectionId synchronously. The caller then polls the same generic GET /api/clouds/:id/status
- * every other connection's post-connect progress uses.
+ * Google Workspace's own connect-init endpoint — same shape as initCloudConnect above (returns a
+ * popup authorizeUrl), just a different base path since Google's OAuth client/callback are
+ * entirely separate from the M365 one. The popup only confirms identity; actual data access is
+ * verified server-side via domain-wide delegation before the connection is created — see
+ * routes/googleConnections.ts.
  */
-export function verifyAndConnectGoogleMyDrive(domain: string, adminEmail: string): Promise<{ connectionId: string; status: "connecting" }> {
-  return rawFetch(`/api/google-clouds/connect/verify`, {
-    method: "POST",
-    body: JSON.stringify({ domain, adminEmail }),
-  });
+export function initGoogleCloudConnect(cloudType: CloudType): Promise<{ authorizeUrl: string; state: string }> {
+  return rawFetch(`/api/google-clouds/${cloudType}/connect/init`, { method: "POST" });
 }
 
 /**
@@ -179,6 +180,41 @@ export function openConnectPopup(authorizeUrl: string, cloudType: CloudType): Pr
       if (popup?.closed) {
         cleanup();
         resolve({ type: "m365-connect-complete", status: "error", cloudType: null, reason: "closed" });
+      }
+    }, 500);
+  });
+}
+
+/**
+ * Same shape as openConnectPopup above (own copy, not a shared parameterized helper — see this
+ * file's own convention of a dedicated function per concern), for Google's OAuth popup instead of
+ * Microsoft's. Each Google workload tile connects independently — its own popup, own OAuth
+ * consent — even if another Google workload is already connected for the same admin/domain.
+ */
+export function openGoogleConnectPopup(authorizeUrl: string, cloudType: CloudType): Promise<GoogleConnectMessage> {
+  return new Promise((resolve) => {
+    const windowName = `google-connect-${cloudType}-${Date.now()}`;
+    const popup = window.open(authorizeUrl, windowName, "width=500,height=680,menubar=no,toolbar=no");
+
+    function cleanup() {
+      window.removeEventListener("message", onMessage);
+      clearInterval(pollClosed);
+    }
+
+    function onMessage(event: MessageEvent) {
+      if (event.source !== popup) return;
+      const data = event.data as GoogleConnectMessage;
+      if (data?.type !== "google-connect-complete") return;
+      cleanup();
+      resolve(data);
+    }
+
+    window.addEventListener("message", onMessage);
+
+    const pollClosed = window.setInterval(() => {
+      if (popup?.closed) {
+        cleanup();
+        resolve({ type: "google-connect-complete", status: "error", cloudType: null, reason: "closed" });
       }
     }, 500);
   });

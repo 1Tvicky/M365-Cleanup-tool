@@ -16,9 +16,10 @@ import {
   type TeamSummary,
 } from "../graph/cloudEnumeration.js";
 import { runThrottled } from "../services/rateLimiter.js";
-import type { CloudType } from "../types/connections.js";
+import { cloudProvider, type CloudType } from "../types/connections.js";
 import { connection as redis } from "./queue.js";
 import { isGoogleReauthError, listAllGoogleDomainUsers, syncGoogleMyDrive } from "./googleDriveSync.js";
+import { listAllSharedDrivesForAdmin, syncSharedDrives } from "./googleSharedDriveSync.js";
 
 /**
  * Maps a resource's own Graph id (user id / site id / team id) to its sync_job_resources.id, for a
@@ -529,11 +530,23 @@ export const cloudSyncWorker = new Worker(
     try {
       let failed = 0;
 
-      if (info.cloud_type === "google_my_drive") {
-        // Google's per-item impersonated-client model (built inside syncGoogleMyDrive's own
-        // runThrottled callback) means there's no single shared client to build here, unlike every
-        // M365 branch below.
-        if (isScoped) {
+      if (info.cloud_type === "google_my_drive" || info.cloud_type === "shared_drive") {
+        // Google's per-item impersonated-client model (built inside syncGoogleMyDrive's/
+        // syncSharedDrives's own runThrottled callback) means there's no single shared client to
+        // build here, unlike every M365 branch below.
+        if (info.cloud_type === "shared_drive") {
+          if (isScoped) {
+            const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
+            await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
+            const drives = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, name: r.display_name }));
+            failed = await syncSharedDrives(info.admin_upn, info.connection_id, syncJobId, drives, resourceRows);
+          } else {
+            const drives = await listAllSharedDrivesForAdmin(info.admin_upn);
+            await pruneStaleConnectionUsers(info.connection_id, drives.map((d) => d.id));
+            await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, drives.length]);
+            failed = await syncSharedDrives(info.admin_upn, info.connection_id, syncJobId, drives, null);
+          }
+        } else if (isScoped) {
           const resourceRows: ResourceRowMap = new Map(selectedResources.rows.map((r) => [r.graph_resource_id, r.id]));
           await query(`UPDATE sync_jobs SET total_users = $2 WHERE id = $1`, [syncJobId, selectedResources.rows.length]);
           const users = selectedResources.rows.map((r) => ({ id: r.graph_resource_id, email: r.secondary ?? "", displayName: r.display_name }));
@@ -617,7 +630,7 @@ export const cloudSyncWorker = new Worker(
       // A tenant-wide auth failure (revoked consent, expired app-only grant / revoked domain-wide
       // delegation) is a distinct connection state, not a stalled progress bar — requirement #5 of
       // the connections spec. Google's error shape differs from Graph's, hence the separate check.
-      if (info.cloud_type === "google_my_drive" ? isGoogleReauthError(err) : isReauthError(err)) {
+      if (cloudProvider(info.cloud_type) === "google" ? isGoogleReauthError(err) : isReauthError(err)) {
         await query(
           `UPDATE connections SET status = 'needs_reauth', last_error = $2 WHERE id = $1`,
           [info.connection_id, String(err)]

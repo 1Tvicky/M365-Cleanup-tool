@@ -9,6 +9,9 @@ export const CONNECTORS: CloudConnector[] = [
   { id: "teams", label: "Microsoft Teams" },
   { id: "outlook", label: "Outlook" },
   { id: "google_my_drive", label: "Google My Drive" },
+  { id: "shared_drive", label: "Shared Drives" },
+  { id: "google_chat", label: "Google Chat" },
+  { id: "gmail", label: "Gmail" },
 ];
 
 export const MOCK_TENANTS: Tenant[] = [

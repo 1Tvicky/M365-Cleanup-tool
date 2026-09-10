@@ -7,6 +7,7 @@ import {
   listCleaningConnections,
   listGoogleMyDriveAccounts,
   listOneDriveAccounts,
+  listSharedDrives,
   listOutlookCalendars,
   listOutlookContacts,
   listOutlookMailboxes,
@@ -48,6 +49,9 @@ interface TenantGroup {
   teams?: CleaningConnectionRow;
   outlook?: CleaningConnectionRow;
   google_my_drive?: CleaningConnectionRow;
+  shared_drive?: CleaningConnectionRow;
+  google_chat?: CleaningConnectionRow;
+  gmail?: CleaningConnectionRow;
 }
 
 type View =
@@ -58,6 +62,7 @@ type View =
   | "teams"
   | "outlook"
   | "google_my_drive"
+  | "shared_drive"
   | "review"
   | "cleanupConfirm"
   | "cleanupProgress"
@@ -71,7 +76,7 @@ type View =
  * deliberately doesn't touch the address bar at all — reloading mid-flow already falls back to
  * Landing today, and that isn't something this change is meant to fix.
  */
-const URL_SYNCED_VIEWS = new Set<View>(["landing", "dashboard", "onedrive", "sharepoint", "teams", "outlook"]);
+const URL_SYNCED_VIEWS = new Set<View>(["landing", "dashboard", "onedrive", "sharepoint", "teams", "outlook", "google_my_drive", "shared_drive"]);
 
 function cleaningUrlFor(view: View, activeGroup: TenantGroup | null): string {
   if (view === "landing" || !activeGroup) return "/cleaning";
@@ -128,7 +133,8 @@ function buildCleanupManifest(
   selectedOutlookContacts: Map<string, CleaningResourceRow>,
   selectedChannels: Map<string, CleaningChannelRow>,
   selectedChats: Map<string, CleaningChatRow>,
-  selectedGoogleMyDrive: Map<string, CleaningResourceRow>
+  selectedGoogleMyDrive: Map<string, CleaningResourceRow>,
+  selectedSharedDrives: Map<string, CleaningResourceRow>
 ): CleanupManifest {
   const manifest: CleanupManifest = {};
   if (selectedOneDrive.size > 0 && group.onedrive) manifest.oneDrive = { connectionId: group.onedrive.id, ids: [...selectedOneDrive.keys()] };
@@ -139,6 +145,7 @@ function buildCleanupManifest(
   if (selectedChannels.size > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: [...selectedChannels.keys()] };
   if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
   if (selectedGoogleMyDrive.size > 0 && group.google_my_drive) manifest.googleMyDrive = { connectionId: group.google_my_drive.id, ids: [...selectedGoogleMyDrive.keys()] };
+  if (selectedSharedDrives.size > 0 && group.shared_drive) manifest.sharedDrives = { connectionId: group.shared_drive.id, ids: [...selectedSharedDrives.keys()] };
   return manifest;
 }
 
@@ -184,6 +191,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
   const [selectedGoogleMyDrive, setSelectedGoogleMyDrive] = useState<Map<string, CleaningResourceRow>>(new Map());
+  const [selectedSharedDrives, setSelectedSharedDrives] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [cleanupOperationId, setCleanupOperationId] = useState<string | null>(null);
   const [reconciliationBanner, setReconciliationBanner] = useState<string | null>(null);
 
@@ -256,7 +264,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedOutlookContacts,
       selectedChannels,
       selectedChats,
-      selectedGoogleMyDrive
+      selectedGoogleMyDrive,
+      selectedSharedDrives
     );
     try {
       const { foundIds } = await validateCleanup(manifest);
@@ -269,7 +278,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         (selectedOutlookContacts.size - foundIds.outlookContacts.length) +
         (selectedChannels.size - foundIds.channels.length) +
         (selectedChats.size - foundIds.chats.length) +
-        (selectedGoogleMyDrive.size - foundIds.googleMyDrive.length);
+        (selectedGoogleMyDrive.size - foundIds.googleMyDrive.length) +
+        (selectedSharedDrives.size - foundIds.sharedDrives.length);
       if (removedCount > 0) {
         setSelectedOneDrive((prev) => pruneToFound(prev, foundIds.oneDrive));
         setSelectedSharePoint((prev) => pruneToFound(prev, foundIds.sharePoint));
@@ -279,6 +289,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         setSelectedChannels((prev) => pruneToFound(prev, foundIds.channels));
         setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
         setSelectedGoogleMyDrive((prev) => pruneToFound(prev, foundIds.googleMyDrive));
+        setSelectedSharedDrives((prev) => pruneToFound(prev, foundIds.sharedDrives));
         setReconciliationBanner(
           `${removedCount.toLocaleString()} selected item${removedCount === 1 ? " is" : "s are"} no longer available — your selection has been updated.`
         );
@@ -308,6 +319,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       dmsWithKnownCount: [...selectedChats.values()].filter((r) => r.countStatus === "completed").length,
       googleMyDriveAccounts: selectedGoogleMyDrive.size,
       googleMyDriveBytes: [...selectedGoogleMyDrive.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
+      sharedDrives: selectedSharedDrives.size,
+      sharedDrivesBytes: [...selectedSharedDrives.values()].reduce((s, r) => s + r.storageUsedBytes, 0),
     }),
     [
       selectedOneDrive,
@@ -318,6 +331,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedChannels,
       selectedChats,
       selectedGoogleMyDrive,
+      selectedSharedDrives,
     ]
   );
 
@@ -332,6 +346,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     setSelectedChannels(new Map());
     setSelectedChats(new Map());
     setSelectedGoogleMyDrive(new Map());
+    setSelectedSharedDrives(new Map());
     setActiveGroup(group);
     setView("dashboard");
   }
@@ -364,7 +379,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           selectedOutlookContacts,
           selectedChannels,
           selectedChats,
-          selectedGoogleMyDrive
+          selectedGoogleMyDrive,
+          selectedSharedDrives
         )}
         onBack={() => setView("review")}
         onStarted={(operationId) => {
@@ -402,6 +418,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           setSelectedChannels(new Map());
           setSelectedChats(new Map());
           setSelectedGoogleMyDrive(new Map());
+          setSelectedSharedDrives(new Map());
           setCleanupOperationId(null);
           setView("dashboard");
         }}
@@ -412,7 +429,13 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   // Only shown on the actual selection tables — not on the dashboard or landing page, where it
   // would float over content with no table underneath it for the selection to relate to.
   const showSelectionBar =
-    (view === "onedrive" || view === "sharepoint" || view === "outlook" || view === "teams" || view === "google_my_drive") && hasSelection(totals);
+    (view === "onedrive" ||
+      view === "sharepoint" ||
+      view === "outlook" ||
+      view === "teams" ||
+      view === "google_my_drive" ||
+      view === "shared_drive") &&
+    hasSelection(totals);
 
   return (
     <div className={`px-8 py-6 ${showSelectionBar ? "pb-24" : ""}`}>
@@ -447,6 +470,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
               onOpenTeams={() => setView("teams")}
               onOpenOutlook={() => setView("outlook")}
               onOpenGoogleMyDrive={() => setView("google_my_drive")}
+              onOpenSharedDrives={() => setView("shared_drive")}
               onSyncFinished={handleSyncFinished}
             />
           </>
@@ -486,6 +510,10 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
 
         {view === "google_my_drive" && activeGroup?.google_my_drive && (
           <GoogleMyDriveView connectionId={activeGroup.google_my_drive.id} selected={selectedGoogleMyDrive} setSelected={setSelectedGoogleMyDrive} />
+        )}
+
+        {view === "shared_drive" && activeGroup?.shared_drive && (
+          <SharedDrivesView connectionId={activeGroup.shared_drive.id} selected={selectedSharedDrives} setSelected={setSelectedSharedDrives} />
         )}
       </div>
 
@@ -750,6 +778,7 @@ function Dashboard({
   onOpenTeams,
   onOpenOutlook,
   onOpenGoogleMyDrive,
+  onOpenSharedDrives,
   onSyncFinished,
 }: {
   group: TenantGroup;
@@ -758,6 +787,7 @@ function Dashboard({
   onOpenTeams: () => void;
   onOpenOutlook: () => void;
   onOpenGoogleMyDrive: () => void;
+  onOpenSharedDrives: () => void;
   onSyncFinished: () => void;
 }) {
   const [oneDriveTotals, setOneDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
@@ -767,6 +797,7 @@ function Dashboard({
   const [outlookContactTotals, setOutlookContactTotals] = useState<{ contacts: number } | null>(null);
   const [teamsSummary, setTeamsSummary] = useState<CleaningTeamsSummary | null>(null);
   const [googleMyDriveTotals, setGoogleMyDriveTotals] = useState<{ count: number; bytes: number } | null>(null);
+  const [sharedDrivesTotals, setSharedDrivesTotals] = useState<{ count: number; bytes: number } | null>(null);
 
   const refreshTotals = useCallback(() => {
     if (group.onedrive) {
@@ -780,6 +811,11 @@ function Dashboard({
     if (group.google_my_drive) {
       listGoogleMyDriveAccounts(group.google_my_drive.id, { sort: "storage", pageSize: 200 }).then(({ accounts, total }) => {
         setGoogleMyDriveTotals({ count: total, bytes: accounts.reduce((s, a) => s + a.storageUsedBytes, 0) });
+      });
+    }
+    if (group.shared_drive) {
+      listSharedDrives(group.shared_drive.id, { sort: "storage", pageSize: 200 }).then(({ drives, total }) => {
+        setSharedDrivesTotals({ count: total, bytes: drives.reduce((s, a) => s + a.storageUsedBytes, 0) });
       });
     }
     if (group.sharepoint) {
@@ -975,6 +1011,31 @@ function Dashboard({
             group.google_my_drive && (
               <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>
             )
+          }
+        />
+        <ServiceCard
+          icon="🗄️"
+          name="Shared Drives"
+          stats={
+            group.shared_drive ? (
+              sharedDrivesTotals ? (
+                <>
+                  <div>{sharedDrivesTotals.count.toLocaleString()}{sharedDrivesTotals.count > 0 ? "+" : ""} drives</div>
+                  <div>{formatBytes(sharedDrivesTotals.bytes)} used</div>
+                </>
+              ) : (
+                <div className="italic text-slate-400">Loading…</div>
+              )
+            ) : (
+              <div className="text-slate-400">Not connected</div>
+            )
+          }
+          action="View Drives"
+          onClick={onOpenSharedDrives}
+          disabled={!group.shared_drive}
+          // Same deferred inline "Sync Now" shortcut as Google My Drive above — see that card's comment.
+          syncControl={
+            group.shared_drive && <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>
           }
         />
       </div>
@@ -1191,6 +1252,60 @@ function GoogleMyDriveView({ connectionId, selected, setSelected }: { connection
           setSelected(next);
         }}
         emptyMessage="No Google My Drive accounts found."
+      />
+    </div>
+  );
+}
+
+/** Same shape as GoogleMyDriveView above — Shared Drives reuses the identical CleaningResourceRow/listCleaningResources plumbing, just a different discovery endpoint and column labels (a drive's "name" is its only identifier, no secondary email/URL). */
+function SharedDrivesView({ connectionId, selected, setSelected }: { connectionId: string; selected: Map<string, CleaningResourceRow>; setSelected: (m: Map<string, CleaningResourceRow>) => void }) {
+  const [search, setSearch] = useState("");
+  const [sort, setSort] = useState<"storage" | "name">("storage");
+  const fetcher = useCallback(
+    (opts: { search?: string; sort?: "storage" | "name"; page?: number; pageSize?: number }) =>
+      listSharedDrives(connectionId, opts).then((r) => ({ rows: r.drives, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const { rows, loading, error, page, totalPages, total, goToPage } = usePagedList(fetcher, search, sort);
+
+  const columns: DiscoveryColumn<CleaningResourceRow>[] = [
+    { label: "Shared Drive Name", render: (r) => r.name },
+    { label: "Storage Used", align: "right", render: (r) => <StorageUsedCell row={r} /> },
+    { label: "Status", render: (r) => (r.status === "failed" ? <span className="text-rose-500">Unavailable</span> : "Ready") },
+  ];
+
+  return (
+    <div>
+      <h2 className="mb-1 text-lg font-semibold text-slate-800">Shared Drives</h2>
+      <p className="mb-5 text-sm text-slate-500">All shared drives and their storage usage — cleanup removes content only, never the drive itself</p>
+      <DiscoveryTable
+        title="Shared Drives"
+        columns={columns}
+        rows={rows}
+        loading={loading}
+        error={error}
+        page={page}
+        totalPages={totalPages}
+        total={total}
+        onGoToPage={goToPage}
+        search={search}
+        onSearchChange={setSearch}
+        searchPlaceholder="Search drives…"
+        sortOptions={[{ value: "storage", label: "Storage" }, { value: "name", label: "Name" }]}
+        sort={sort}
+        onSortChange={(v) => setSort(v as "storage" | "name")}
+        selected={new Set(selected.keys())}
+        onToggle={(id) => {
+          const row = rows.find((r) => r.id === id);
+          if (row) toggleInMap(selected, setSelected, id, row);
+        }}
+        onToggleAll={() => {
+          const allSelected = rows.every((r) => selected.has(r.id));
+          const next = new Map(selected);
+          for (const r of rows) allSelected ? next.delete(r.id) : next.set(r.id, r);
+          setSelected(next);
+        }}
+        emptyMessage="No Shared Drives found."
       />
     </div>
   );

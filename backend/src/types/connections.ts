@@ -1,13 +1,24 @@
-export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook" | "google_my_drive";
+export type CloudType = "onedrive" | "sharepoint" | "teams" | "outlook" | "google_my_drive" | "shared_drive" | "google_chat" | "gmail";
 export type ConnectionStatus = "connecting" | "active" | "error" | "needs_reauth" | "disconnected";
 export type SyncJobStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type ConnectionUserSyncStatus = "pending" | "synced" | "failed";
 
-export const CLOUD_TYPES: readonly CloudType[] = ["onedrive", "sharepoint", "teams", "outlook", "google_my_drive"];
+export const CLOUD_TYPES: readonly CloudType[] = [
+  "onedrive",
+  "sharepoint",
+  "teams",
+  "outlook",
+  "google_my_drive",
+  "shared_drive",
+  "google_chat",
+  "gmail",
+];
 
-/** onedrive/sharepoint/teams/outlook are Microsoft Graph, driven by tenants.m365_tenant_id; google_my_drive is Google Workspace domain-wide delegation, driven by tenants.google_customer_id. Never mixed within one tenant's connections. */
+export const GOOGLE_CLOUD_TYPES: readonly CloudType[] = ["google_my_drive", "shared_drive", "google_chat", "gmail"];
+
+/** onedrive/sharepoint/teams/outlook are Microsoft Graph, driven by tenants.m365_tenant_id; google_my_drive/shared_drive/google_chat/gmail are Google Workspace domain-wide delegation, driven by tenants.google_customer_id. Never mixed within one tenant's connections. */
 export function cloudProvider(cloudType: CloudType): "m365" | "google" {
-  return cloudType === "google_my_drive" ? "google" : "m365";
+  return (GOOGLE_CLOUD_TYPES as readonly string[]).includes(cloudType) ? "google" : "m365";
 }
 
 export function isCloudType(value: string): value is CloudType {

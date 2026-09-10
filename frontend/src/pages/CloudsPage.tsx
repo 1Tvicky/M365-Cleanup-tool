@@ -1,15 +1,15 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import { CloudTileGrid } from "../components/clouds/CloudTileGrid";
-import { GoogleConnectDialog } from "../components/clouds/GoogleConnectDialog";
 import { ManageClouds } from "../components/clouds/ManageClouds";
 import { UserMenu } from "../components/layout/UserMenu";
 import {
   disconnectCloudConnection,
   initCloudConnect,
+  initGoogleCloudConnect,
   listManageClouds,
   openConnectPopup,
+  openGoogleConnectPopup,
   resyncCloudConnection,
-  verifyAndConnectGoogleMyDrive,
   type ManageCloudsRow,
 } from "../api/clouds";
 import { ApiClientError } from "../api/client";
@@ -36,9 +36,6 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
   const [connectingTypes, setConnectingTypes] = useState<Set<Workload>>(new Set());
   const [resyncingId, setResyncingId] = useState<string | null>(null);
   const [toast, setToast] = useState<{ message: string; ok: boolean } | null>(null);
-  const [googleDialogOpen, setGoogleDialogOpen] = useState(false);
-  const [googleSubmitting, setGoogleSubmitting] = useState(false);
-  const [googleError, setGoogleError] = useState<string | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const refresh = useCallback(async () => {
@@ -124,20 +121,30 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
     }
   }
 
-  /** Google's connect action — verify domain-wide delegation and create the connection, then reuse the exact same refresh()/poll mechanism handleConnect's popup path relies on. No popup, no window.opener handshake — see GoogleConnectDialog. */
-  async function handleConnectGoogleSubmit(domain: string, adminEmail: string) {
-    setGoogleSubmitting(true);
-    setGoogleError(null);
+  /** Google's connect action — a real OAuth popup, same shape as handleConnect above, just Google's own init endpoint/popup helper (separate OAuth client, separate callback — see routes/googleConnections.ts). Each Google workload tile connects independently, matching handleConnect's per-workload connectingTypes tracking. */
+  async function handleConnectGoogle(workload: Workload) {
+    if (connectingTypes.has(workload)) return;
+    setConnectingTypes((prev) => new Set(prev).add(workload));
     try {
-      await verifyAndConnectGoogleMyDrive(domain, adminEmail);
-      setGoogleDialogOpen(false);
+      const { authorizeUrl } = await initGoogleCloudConnect(workload);
+      const result = await openGoogleConnectPopup(authorizeUrl, workload);
       await refresh();
-      showToast("Google Workspace connected — syncing now.", true);
-      setTab("manage");
+      if (result.status === "success") {
+        showToast("Account added successfully.", true);
+        setTab("manage");
+      } else if (result.reason !== "closed") {
+        showToast(`Couldn't connect: ${result.reason}`);
+      } else {
+        setTab("manage");
+      }
     } catch (err) {
-      setGoogleError(err instanceof ApiClientError ? err.message : "Couldn't verify domain-wide delegation. Try again.");
+      showToast(err instanceof ApiClientError ? err.message : "Couldn't start the connection. Try again.");
     } finally {
-      setGoogleSubmitting(false);
+      setConnectingTypes((prev) => {
+        const next = new Set(prev);
+        next.delete(workload);
+        return next;
+      });
     }
   }
 
@@ -176,25 +183,13 @@ export function CloudsPage({ operator, onLogout }: { operator: OperatorSummary; 
 
       <div className="px-8 py-6">
         {tab === "add" ? (
-          <CloudTileGrid onConnect={handleConnect} onConnectGoogle={() => setGoogleDialogOpen(true)} connectingTypes={connectingTypes} />
+          <CloudTileGrid onConnect={handleConnect} onConnectGoogle={handleConnectGoogle} connectingTypes={connectingTypes} />
         ) : loading ? (
           <p className="text-sm text-slate-500">Loading…</p>
         ) : (
           <ManageClouds connections={connections} onResync={handleResync} onDisconnect={handleDisconnect} resyncingId={resyncingId} />
         )}
       </div>
-
-      {googleDialogOpen && (
-        <GoogleConnectDialog
-          onCancel={() => {
-            setGoogleDialogOpen(false);
-            setGoogleError(null);
-          }}
-          onSubmit={handleConnectGoogleSubmit}
-          submitting={googleSubmitting}
-          error={googleError}
-        />
-      )}
 
       {toast && (
         <div

@@ -108,6 +108,39 @@ export function OfficeRibbonIcon({ className }: { className?: string }) {
   );
 }
 
+/** Google Drive's triangle mark, used for the Shared Drives tile (distinct from GoogleIcon's "G" mark, which backs My Drive) — official brand colors (#0F9D58/#FFCD40/#4285F4), reasonable approximation not pixel-sampled. */
+export function SharedDrivesIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden>
+      <path d="M17 6h14l14 24-7 12H10l-7-12Z" fill="#FFCD40" />
+      <path d="M17 6 3 30h14l7-12Z" fill="#0F9D58" />
+      <path d="M31 6 45 30H31l-7-12Z" fill="#4285F4" />
+    </svg>
+  );
+}
+
+/** Google Chat's speech-bubble mark — official teal/green family (#00897B/#00BFA5), reasonable approximation not pixel-sampled. */
+export function GoogleChatIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden>
+      <path d="M8 10h32a4 4 0 0 1 4 4v16a4 4 0 0 1-4 4H20l-9 8v-8H8a4 4 0 0 1-4-4V14a4 4 0 0 1 4-4Z" fill="#00897B" />
+      <circle cx="16" cy="22" r="2.6" fill="#fff" />
+      <circle cx="24" cy="22" r="2.6" fill="#fff" />
+      <circle cx="32" cy="22" r="2.6" fill="#00BFA5" />
+    </svg>
+  );
+}
+
+/** Gmail's red "M" envelope mark — official brand color (#EA4335), reasonable approximation not pixel-sampled. */
+export function GmailIcon({ className }: { className?: string }) {
+  return (
+    <svg viewBox="0 0 48 48" className={className} aria-hidden>
+      <rect x="4" y="10" width="40" height="28" rx="3" fill="#fff" stroke="#EA4335" strokeWidth="2.5" />
+      <path d="M6 12l18 14 18-14" fill="none" stroke="#EA4335" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+}
+
 /* --- Outline variants for the login screen's blue-panel provider row (line-art on solid color, matching the reference footer treatment). --- */
 
 export function OneDriveOutlineIcon({ className }: { className?: string }) {

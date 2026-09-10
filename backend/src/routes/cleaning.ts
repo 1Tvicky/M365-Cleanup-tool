@@ -286,6 +286,16 @@ cleaningRouter.get(
   })
 );
 
+/** GET /api/cleaning/connections/:id/shared-drives — Shared Drives table. Same reuse as google-my-drive above. */
+cleaningRouter.get(
+  "/connections/:id/shared-drives",
+  asyncHandler(async (req, res) => {
+    await requireConnectionAccess(req.params.id!, req.session!.operatorId, "shared_drive");
+    const { rows, total, page, pageSize } = await listCleaningResources(req.params.id!, "shared_drive", parsePageQuery(req));
+    res.json({ drives: rows, total, page, pageSize });
+  })
+);
+
 /**
  * Reads connection_outlook_calendars — its own dedicated query, not a reuse/generalization of
  * listCleaningResources (which is hardcoded to connection_users), per the no-shared-Outlook-helper
@@ -739,6 +749,7 @@ async function resolveManifestTenant(manifest: CleanupManifest, operatorId: stri
         manifest.channels?.connectionId,
         manifest.chats?.connectionId,
         manifest.googleMyDrive?.connectionId,
+        manifest.sharedDrives?.connectionId,
       ].filter((id): id is string => Boolean(id))
     ),
   ];
@@ -797,6 +808,7 @@ async function resolveManifestItems(
     channels: [],
     chats: [],
     googleMyDrive: [],
+    sharedDrives: [],
   };
 
   if (manifest.oneDrive) {
@@ -1009,6 +1021,35 @@ async function resolveManifestItems(
     }
   }
 
+  // Google Shared Drives — same shape as googleMyDrive above, but graphRef is keyed driveId (no
+  // owning user to impersonate; executeSharedDriveItem impersonates the connection's admin
+  // instead, read from cleanup_operation_items' joined connections row at execution time).
+  if (manifest.sharedDrives) {
+    await requireConnectionAccess(manifest.sharedDrives.connectionId, operatorId, "shared_drive");
+    const result = await db.query<{ id: string; display_name: string | null; upn: string; graph_user_id: string }>(
+      `SELECT id, display_name, upn, graph_user_id FROM connection_users WHERE connection_id = $1 AND id = ANY($2::uuid[])`,
+      [manifest.sharedDrives.connectionId, manifest.sharedDrives.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.id, r]));
+    for (const id of manifest.sharedDrives.ids) {
+      const row = found.get(id);
+      if (!row) {
+        errors.push(`A selected Shared Drive is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.sharedDrives.connectionId,
+        resourceType: "shared_drive",
+        resourceId: row.id,
+        displayName: row.display_name ?? row.upn,
+        // graph_user_id doubles as the Shared Drive's Google id for shared_drive-type connections (see migrations/015).
+        graphRef: { driveId: row.graph_user_id },
+        supported: true,
+      });
+      foundIds.sharedDrives.push(row.id);
+    }
+  }
+
   return { items, errors, foundIds };
 }
 
@@ -1020,6 +1061,7 @@ function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult[
     outlookCalendars: items.filter((i) => i.resourceType === "outlook_calendar").length,
     outlookContacts: items.filter((i) => i.resourceType === "outlook_contacts").length,
     googleMyDriveAccounts: items.filter((i) => i.resourceType === "google_my_drive_account").length,
+    sharedDrives: items.filter((i) => i.resourceType === "shared_drive").length,
     channels: items.filter((i) => i.resourceType === "channel").length,
     chats: items.filter((i) => i.resourceType === "chat").length,
   };
@@ -1266,6 +1308,7 @@ const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   channel: "Teams channel",
   chat: "Direct message",
   google_my_drive_account: "Google My Drive account",
+  shared_drive: "Google Shared Drive",
 };
 
 /** Matches an operation whose touched connections include one with a matching display_name — used by both the list and its count query, so the two never disagree on what "matches" means. */

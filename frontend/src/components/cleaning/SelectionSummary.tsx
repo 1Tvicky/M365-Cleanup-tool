@@ -23,6 +23,8 @@ export interface SelectionTotals {
   dmsWithKnownCount: number;
   googleMyDriveAccounts: number;
   googleMyDriveBytes: number;
+  sharedDrives: number;
+  sharedDrivesBytes: number;
 }
 
 export function messagesFragment(selectedCount: number, knownCount: number, total: number): string {
@@ -40,7 +42,8 @@ export function hasSelection(t: SelectionTotals): boolean {
       t.outlookContactUsers +
       t.teamsChannels +
       t.dms +
-      t.googleMyDriveAccounts >
+      t.googleMyDriveAccounts +
+      t.sharedDrives >
     0
   );
 }
@@ -65,6 +68,8 @@ export function SelectionSummary({ totals, onReview }: { totals: SelectionTotals
     parts.push(`${totals.dms.toLocaleString()} conversation${totals.dms === 1 ? "" : "s"} · ${messagesFragment(totals.dms, totals.dmsWithKnownCount, totals.dmMessages)}`);
   if (totals.googleMyDriveAccounts > 0)
     parts.push(`${totals.googleMyDriveAccounts.toLocaleString()} Google My Drive account${totals.googleMyDriveAccounts === 1 ? "" : "s"} · ${formatBytes(totals.googleMyDriveBytes)}`);
+  if (totals.sharedDrives > 0)
+    parts.push(`${totals.sharedDrives.toLocaleString()} Shared Drive${totals.sharedDrives === 1 ? "" : "s"} · ${formatBytes(totals.sharedDrivesBytes)}`);
 
   return (
     // Fixed to the viewport, not sticky within the page's own scroll flow — a long discovery list
