@@ -230,6 +230,16 @@ cloudConnectionsRouter.get(
                 COUNT(*) FILTER (WHERE sync_status = 'failed') AS not_added_users
          FROM connection_users
          GROUP BY connection_id
+         UNION ALL
+         -- Google Chat spaces live in their own table (connection_google_spaces), not
+         -- connection_users, since a Space isn't a per-user resource — see migrations/015. A
+         -- connection only ever has rows in one of the two tables, so UNION ALL can't double-count.
+         SELECT connection_id,
+                COUNT(*) AS total_known_users,
+                COUNT(*) FILTER (WHERE sync_status = 'synced') AS added_users,
+                COUNT(*) FILTER (WHERE sync_status = 'failed') AS not_added_users
+         FROM connection_google_spaces
+         GROUP BY connection_id
        ) cu ON cu.connection_id = c.id
        WHERE c.status != 'disconnected'`,
       [req.session!.operatorId]
@@ -399,42 +409,76 @@ cloudConnectionsRouter.get(
 cloudConnectionsRouter.get(
   "/:id/users",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const { cloudType } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
 
     const limit = Math.min(Number(req.query.limit) || 50, 200);
     const cursor = typeof req.query.cursor === "string" ? req.query.cursor : null;
     const statusFilter = req.query.status === "failed" || req.query.status === "synced" || req.query.status === "pending" ? req.query.status : null;
 
-    const result = await query<{
-      id: string;
-      graph_user_id: string;
-      upn: string;
-      display_name: string | null;
-      storage_used_bytes: string;
-      item_count: number;
-      sync_status: ConnectionUserRow["syncStatus"];
-      last_synced_at: string | null;
-      error_message: string | null;
-    }>(
-      `SELECT id, graph_user_id, upn, display_name, storage_used_bytes, item_count, sync_status, last_synced_at, error_message
-       FROM connection_users
-       WHERE connection_id = $1 AND ($2::uuid IS NULL OR id > $2) AND ($4::text IS NULL OR sync_status = $4)
-       ORDER BY id
-       LIMIT $3`,
-      [req.params.id, cursor, limit, statusFilter]
-    );
+    // Google Chat spaces live in connection_google_spaces, not connection_users (see the /manage
+    // query's comment above) — space_id stands in for upn/graph_user_id, member_count for
+    // itemCount, and there's no storage figure for a Chat space.
+    const result =
+      cloudType === "google_chat"
+        ? await query<{
+            id: string;
+            space_id: string;
+            display_name: string | null;
+            member_count: number;
+            sync_status: ConnectionUserRow["syncStatus"];
+            last_synced_at: string | null;
+            error_message: string | null;
+          }>(
+            `SELECT id, space_id, display_name, member_count, sync_status, last_synced_at, error_message
+             FROM connection_google_spaces
+             WHERE connection_id = $1 AND ($2::uuid IS NULL OR id > $2) AND ($4::text IS NULL OR sync_status = $4)
+             ORDER BY id
+             LIMIT $3`,
+            [req.params.id, cursor, limit, statusFilter]
+          )
+        : await query<{
+            id: string;
+            graph_user_id: string;
+            upn: string;
+            display_name: string | null;
+            storage_used_bytes: string;
+            item_count: number;
+            sync_status: ConnectionUserRow["syncStatus"];
+            last_synced_at: string | null;
+            error_message: string | null;
+          }>(
+            `SELECT id, graph_user_id, upn, display_name, storage_used_bytes, item_count, sync_status, last_synced_at, error_message
+             FROM connection_users
+             WHERE connection_id = $1 AND ($2::uuid IS NULL OR id > $2) AND ($4::text IS NULL OR sync_status = $4)
+             ORDER BY id
+             LIMIT $3`,
+            [req.params.id, cursor, limit, statusFilter]
+          );
 
-    const users: ConnectionUserRow[] = result.rows.map((r) => ({
-      id: r.id,
-      graphUserId: r.graph_user_id,
-      upn: r.upn,
-      displayName: r.display_name,
-      storageUsedBytes: Number(r.storage_used_bytes),
-      itemCount: r.item_count,
-      syncStatus: r.sync_status,
-      lastSyncedAt: r.last_synced_at,
-      errorMessage: r.error_message,
-    }));
+    const users: ConnectionUserRow[] =
+      cloudType === "google_chat"
+        ? (result.rows as { id: string; space_id: string; display_name: string | null; member_count: number; sync_status: ConnectionUserRow["syncStatus"]; last_synced_at: string | null; error_message: string | null }[]).map((r) => ({
+            id: r.id,
+            graphUserId: r.space_id,
+            upn: r.space_id,
+            displayName: r.display_name,
+            storageUsedBytes: 0,
+            itemCount: r.member_count,
+            syncStatus: r.sync_status,
+            lastSyncedAt: r.last_synced_at,
+            errorMessage: r.error_message,
+          }))
+        : (result.rows as { id: string; graph_user_id: string; upn: string; display_name: string | null; storage_used_bytes: string; item_count: number; sync_status: ConnectionUserRow["syncStatus"]; last_synced_at: string | null; error_message: string | null }[]).map((r) => ({
+            id: r.id,
+            graphUserId: r.graph_user_id,
+            upn: r.upn,
+            displayName: r.display_name,
+            storageUsedBytes: Number(r.storage_used_bytes),
+            itemCount: r.item_count,
+            syncStatus: r.sync_status,
+            lastSyncedAt: r.last_synced_at,
+            errorMessage: r.error_message,
+          }));
 
     res.json({ users, nextCursor: users.length === limit ? users[users.length - 1]!.id : null });
   })
@@ -448,25 +492,32 @@ function csvEscape(value: string): string {
 cloudConnectionsRouter.get(
   "/:id/users/export",
   asyncHandler(async (req, res) => {
-    await requireConnectionAccess(req.params.id!, req.session!.operatorId);
+    const { cloudType } = await requireConnectionAccess(req.params.id!, req.session!.operatorId);
 
-    const result = await query<{
-      upn: string;
-      display_name: string | null;
-      storage_used_bytes: string;
-      item_count: number;
-      sync_status: ConnectionUserRow["syncStatus"];
-      error_message: string | null;
-    }>(
-      `SELECT upn, display_name, storage_used_bytes, item_count, sync_status, error_message
-       FROM connection_users
-       WHERE connection_id = $1
-       ORDER BY COALESCE(display_name, upn)`,
-      [req.params.id]
-    );
+    // Same connection_google_spaces vs connection_users split as GET /:id/users above.
+    const rows =
+      cloudType === "google_chat"
+        ? (
+            await query<{ space_id: string; display_name: string | null; member_count: number; sync_status: ConnectionUserRow["syncStatus"]; error_message: string | null }>(
+              `SELECT space_id, display_name, member_count, sync_status, error_message
+               FROM connection_google_spaces
+               WHERE connection_id = $1
+               ORDER BY COALESCE(display_name, space_id)`,
+              [req.params.id]
+            )
+          ).rows.map((r) => ({ upn: r.space_id, display_name: r.display_name, storage_used_bytes: "0", item_count: r.member_count, sync_status: r.sync_status, error_message: r.error_message }))
+        : (
+            await query<{ upn: string; display_name: string | null; storage_used_bytes: string; item_count: number; sync_status: ConnectionUserRow["syncStatus"]; error_message: string | null }>(
+              `SELECT upn, display_name, storage_used_bytes, item_count, sync_status, error_message
+               FROM connection_users
+               WHERE connection_id = $1
+               ORDER BY COALESCE(display_name, upn)`,
+              [req.params.id]
+            )
+          ).rows;
 
     const header = ["Name", "Email", "Storage Used (bytes)", "Item Count", "Status", "Notes"].map(csvEscape).join(",");
-    const rows = result.rows.map((r) =>
+    const csvRows = rows.map((r) =>
       [
         r.display_name ?? r.upn,
         r.upn,
@@ -481,7 +532,7 @@ cloudConnectionsRouter.get(
 
     res.setHeader("Content-Type", "text/csv; charset=utf-8");
     res.setHeader("Content-Disposition", `attachment; filename="users-${req.params.id}.csv"`);
-    res.send([header, ...rows].join("\r\n"));
+    res.send([header, ...csvRows].join("\r\n"));
   })
 );
 
