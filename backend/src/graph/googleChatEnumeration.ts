@@ -32,7 +32,9 @@ export async function listAllChatSpaces(chat: chat_v1.Chat): Promise<BasicChatSp
   do {
     const res = await chat.spaces.search({
       useAdminAccess: true,
-      query: "customer = 'customers/my_customer' AND spaceType = 'SPACE'",
+      // Google's spaces.search requires double-quoted string literals in this filter — single
+      // quotes are silently rejected as an "Invalid search query" 400, not a formatting nicety.
+      query: 'customer = "customers/my_customer" AND spaceType = "SPACE"',
       pageSize: 1000,
       pageToken,
     });
