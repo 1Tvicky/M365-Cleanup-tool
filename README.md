@@ -1,31 +1,38 @@
 # CloudFuze Cleanup Utility
 
-A guided, audited way to find and permanently remove data left over after a migration into
-**Microsoft 365** (OneDrive, SharePoint, Teams, Outlook) or **Google Workspace** (My Drive, Shared
-Drives, Gmail, Chat) — without guessing what's safe to delete or losing the record of what
-happened.
+**An internal tool — not a customer-facing product.** CloudFuze's own migration product moves data
+between clouds, and testing it means running the same migrations into **Microsoft 365** (OneDrive,
+SharePoint, Teams, Outlook) and **Google Workspace** (My Drive, Shared Drives, Gmail, Chat) test
+tenants over and over. Two problems fall out of that:
 
-When a company migrates from another platform into M365 or Google Workspace, the migration tool
-that got the data there usually leaves the original, now-duplicate copy behind. This app is the
-tool an internal CloudFuze operator uses to go back in, review exactly what's there, and delete it
-— per resource, per tenant, with every deletion backed by an export and an audit trail.
+1. The destination test tenants' storage keeps filling up with every run and has to be cleared out
+   by hand.
+2. Because the same test dataset gets migrated repeatedly, a destination tenant accumulates
+   duplicate, stale data from prior runs — which makes it genuinely hard to tell whether what
+   you're looking at is this run's output or last week's leftovers when validating a migration.
+
+This app exists to solve both: a guided, audited way for CloudFuze engineers to browse exactly
+what's sitting in a destination test tenant and permanently remove it — per resource, per tenant,
+with every deletion backed by an export and an audit trail — so the next test run starts from a
+clean, unambiguous state. It is never pointed at a customer's production tenant.
 
 ## Core concepts
 
 Five ideas recur through the codebase, and keeping them distinct is what makes it safe to operate
-on a customer's tenant:
+on a test tenant without touching the wrong one:
 
 | Concept | Meaning |
 |---|---|
-| **Tenant / domain** | One customer's Microsoft 365 directory or Google Workspace domain. |
+| **Tenant / domain** | One Microsoft 365 directory or Google Workspace domain — in practice, one of CloudFuze's own destination test tenants. |
 | **Connection** | One workload (e.g. OneDrive, Gmail) linked to one tenant, authorized once via Microsoft admin consent or Google sign-in. The trust boundary — everything below it operates within the scope this defines. |
 | **Sync** | Refreshing this app's own record of what a workload contains, for an operator-chosen set of resources — never the whole tenant by default. |
 | **Cleaning** | Browsing synced resources and selecting which ones' data should be deleted. |
 | **Cleanup** | The confirmed, executed deletion run — item by item, never one irreversible batch call. |
 | **Reports** | The permanent, per-item audit trail of every cleanup and sync run, independent of whether the app is still connected. |
 
-A Microsoft 365 tenant and a Google Workspace domain for the same customer are always **two
-separate connections** — never merged, even when they share a company name.
+A Microsoft 365 tenant and a Google Workspace domain that happen to share a domain name (common
+across test tenants, e.g. two different `cloudfuze.co` test accounts) are always **two separate
+connections** — never merged.
 
 ## Supported workloads
 
