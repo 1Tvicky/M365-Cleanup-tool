@@ -1,13 +1,13 @@
 import { CONNECTORS } from "../../api/mockData";
 import type { Workload } from "../../types";
-import { GmailIcon, GoogleChatIcon, GoogleIcon, OneDriveIcon, OutlookIcon, SharedDrivesIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
+import { GmailIcon, GoogleChatIcon, GoogleMyDriveIcon, OneDriveIcon, OutlookIcon, SharedDrivesIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 
 const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = {
   onedrive: OneDriveIcon,
   sharepoint: SharePointIcon,
   teams: TeamsIcon,
   outlook: OutlookIcon,
-  google_my_drive: GoogleIcon,
+  google_my_drive: GoogleMyDriveIcon,
   shared_drive: SharedDrivesIcon,
   google_chat: GoogleChatIcon,
   gmail: GmailIcon,
@@ -57,7 +57,7 @@ export function CloudTileGrid({
               key={c.id}
               className="group relative flex w-[150px] flex-col items-center gap-3 rounded-lg border border-slate-200 bg-white px-3 py-4 transition-colors hover:border-teal-400 hover:shadow-sm"
             >
-              <Icon className="h-12 w-12" />
+              <Icon className="h-16 w-16" />
               <span className={`text-center text-sm font-semibold leading-tight ${accent.label}`}>{c.label}</span>
               <button
                 onClick={() => (GOOGLE_WORKLOADS.has(c.id) ? onConnectGoogle(c.id) : onConnect(c.id))}

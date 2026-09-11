@@ -13,7 +13,7 @@ import {
 import { ApiClientError } from "../../api/client";
 import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../cleaning/DiscoveryTable";
 import { Spinner } from "../cleaning/ItemFilesDrilldown";
-import { GmailIcon, GoogleChatIcon, GoogleIcon, OneDriveIcon, OutlookIcon, SharedDrivesIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
+import { GmailIcon, GoogleChatIcon, GoogleMyDriveIcon, OneDriveIcon, OutlookIcon, SharedDrivesIcon, SharePointIcon, TeamsIcon } from "./CloudIcons";
 import type { Workload } from "../../types";
 import { formatBytes } from "../../utils/format";
 
@@ -24,7 +24,7 @@ const ICONS: Record<Workload, (props: { className?: string }) => JSX.Element> = 
   sharepoint: SharePointIcon,
   teams: TeamsIcon,
   outlook: OutlookIcon,
-  google_my_drive: GoogleIcon,
+  google_my_drive: GoogleMyDriveIcon,
   shared_drive: SharedDrivesIcon,
   google_chat: GoogleChatIcon,
   gmail: GmailIcon,
@@ -146,7 +146,7 @@ function ManageCloudsRowView({
   return (
     <div>
       <div className="flex flex-wrap items-center gap-x-6 gap-y-2 px-6 py-4">
-        <Icon className="h-9 w-9 shrink-0" />
+        <Icon className="h-16 w-16 shrink-0" />
 
         <div className="min-w-[170px]">
           <div className="flex items-center gap-2">

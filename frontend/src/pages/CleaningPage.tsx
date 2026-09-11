@@ -32,6 +32,16 @@ import {
   type PageResult,
 } from "../api/cleaning";
 import { ApiClientError } from "../api/client";
+import {
+  GmailIcon,
+  GoogleChatIcon,
+  GoogleMyDriveIcon,
+  OneDriveIcon,
+  OutlookIcon,
+  SharedDrivesIcon,
+  SharePointIcon,
+  TeamsIcon,
+} from "../components/clouds/CloudIcons";
 import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../components/cleaning/DiscoveryTable";
 import { TeamsChannels } from "../components/cleaning/TeamsChannels";
 import { SelectionSummary, hasSelection, messagesFragment, type SelectionTotals } from "../components/cleaning/SelectionSummary";
@@ -638,7 +648,7 @@ function ServiceCard({
   disabled,
   syncControl,
 }: {
-  icon: string;
+  icon: React.ReactNode;
   name: string;
   stats: React.ReactNode;
   action: string;
@@ -649,7 +659,7 @@ function ServiceCard({
   return (
     <div className="w-64 rounded-xl border border-slate-200 bg-white p-5">
       <div className="mb-3 flex items-center gap-2">
-        <span className="text-xl" aria-hidden>{icon}</span>
+        {icon}
         <span className="text-sm font-semibold text-slate-800">{name}</span>
       </div>
       <div className="space-y-1 text-sm text-slate-600">{stats}</div>
@@ -961,7 +971,7 @@ function Dashboard({
       {group.provider === "m365" && (
         <>
         <ServiceCard
-          icon="☁️"
+          icon={<OneDriveIcon className="h-16 w-16" />}
           name="OneDrive"
           stats={
             group.onedrive ? (
@@ -987,7 +997,7 @@ function Dashboard({
           }
         />
         <ServiceCard
-          icon="📁"
+          icon={<SharePointIcon className="h-16 w-16" />}
           name="SharePoint"
           stats={
             group.sharepoint ? (
@@ -1013,7 +1023,7 @@ function Dashboard({
           }
         />
         <ServiceCard
-          icon="👥"
+          icon={<TeamsIcon className="h-16 w-16" />}
           name="Microsoft Teams"
           stats={
             group.teams ? (
@@ -1041,7 +1051,7 @@ function Dashboard({
           }
         />
         <ServiceCard
-          icon="📧"
+          icon={<OutlookIcon className="h-16 w-16" />}
           name="Outlook"
           stats={
             group.outlook ? (
@@ -1073,7 +1083,7 @@ function Dashboard({
       {group.provider === "google" && (
         <>
         <ServiceCard
-          icon="🔷"
+          icon={<GoogleMyDriveIcon className="h-16 w-16" />}
           name="Google My Drive"
           stats={
             group.google_my_drive ? (
@@ -1105,7 +1115,7 @@ function Dashboard({
           }
         />
         <ServiceCard
-          icon="🗄️"
+          icon={<SharedDrivesIcon className="h-16 w-16" />}
           name="Shared Drives"
           stats={
             group.shared_drive ? (
@@ -1130,7 +1140,7 @@ function Dashboard({
           }
         />
         <ServiceCard
-          icon="✉️"
+          icon={<GmailIcon className="h-16 w-16" />}
           name="Gmail"
           stats={
             group.gmail ? (
@@ -1153,7 +1163,7 @@ function Dashboard({
           syncControl={group.gmail && <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>}
         />
         <ServiceCard
-          icon="💬"
+          icon={<GoogleChatIcon className="h-16 w-16" />}
           name="Google Chat"
           stats={
             group.google_chat ? (
