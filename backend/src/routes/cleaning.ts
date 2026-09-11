@@ -1438,6 +1438,10 @@ const RESOURCE_TYPES: CleanupResourceType[] = [
   "outlook_contacts",
   "channel",
   "chat",
+  "google_my_drive_account",
+  "shared_drive",
+  "gmail_mailbox",
+  "google_chat_space",
 ];
 
 const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
