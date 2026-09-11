@@ -10,7 +10,7 @@ describe("listAllChatSpaces", () => {
     const spaces = await listAllChatSpaces(chat);
 
     expect(spaces).toEqual([{ id: "AAA", displayName: "Marketing" }]);
-    expect(search).toHaveBeenCalledWith(expect.objectContaining({ useAdminAccess: true, query: expect.stringContaining("spaceType = 'SPACE'") }));
+    expect(search).toHaveBeenCalledWith(expect.objectContaining({ useAdminAccess: true, query: expect.stringContaining('spaceType = "SPACE"') }));
   });
 });
 
