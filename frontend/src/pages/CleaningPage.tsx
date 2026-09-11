@@ -1554,7 +1554,7 @@ function GoogleChatView({ connectionId, selected, setSelected }: { connectionId:
   return (
     <div>
       <h2 className="mb-1 text-lg font-semibold text-slate-800">Google Chat</h2>
-      <p className="mb-5 text-sm text-slate-500">All discovered Chat spaces — messages within a space are deleted permanently, with no recoverable alternative</p>
+      <p className="mb-5 text-sm text-slate-500">All discovered Chat spaces — selecting a space deletes the entire space, not just its messages, with no recoverable alternative</p>
       <DiscoveryTable
         title="Google Chat Spaces"
         columns={columns}
