@@ -785,6 +785,15 @@ const cleanupManifestSchema = z.object({
   outlookContacts: manifestSlotSchema.optional(),
   channels: manifestSlotSchema.optional(),
   chats: manifestSlotSchema.optional(),
+  // Added when Google Workspace support landed — z.object() silently strips any key not listed
+  // here (Zod's default "strip unknown keys" behavior), so omitting these wouldn't be a type
+  // error (CleanupManifest's TS interface has no bearing on this schema's own field list) but
+  // would reduce every Google-only manifest to {} before it ever reached resolveManifestTenant,
+  // which then reports it as an empty selection. Caught via a real repro video, not by tsc.
+  googleMyDrive: manifestSlotSchema.optional(),
+  sharedDrives: manifestSlotSchema.optional(),
+  gmail: manifestSlotSchema.optional(),
+  googleChat: manifestSlotSchema.optional(),
 });
 
 // A sibling field to the manifest, not part of CleanupManifest's own structure — chosen by the

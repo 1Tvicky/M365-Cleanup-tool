@@ -9,7 +9,13 @@ import {
 } from "../../api/cleaning";
 import { ApiClientError } from "../../api/client";
 
-/** Names the specific cloud(s) actually being cleaned instead of the generic "Microsoft 365 data" — e.g. "OneDrive", or "OneDrive and SharePoint" when both are in the selection. */
+/**
+ * Names the specific cloud(s) actually being cleaned instead of a vendor-specific default —
+ * e.g. "OneDrive", "OneDrive and SharePoint", or "Google My Drive". Callers always follow this
+ * with a trailing space before "data" (e.g. "the selected {name} data"), so the empty-names
+ * fallback is "" rather than a filler phrase — that would otherwise read as "the selected the
+ * selected data" once the caller's own "the selected" is added.
+ */
 function selectedCloudNames(summary: CleanupValidationResult["summary"]): string {
   const names: string[] = [];
   if (summary.oneDriveAccounts > 0) names.push("OneDrive");
@@ -19,7 +25,7 @@ function selectedCloudNames(summary: CleanupValidationResult["summary"]): string
   if (summary.sharedDrives > 0) names.push("Google Shared Drives");
   if (summary.gmailMailboxes > 0) names.push("Gmail");
   if (summary.googleChatSpaces > 0) names.push("Google Chat");
-  return names.length > 0 ? names.join(" and ") : "the selected";
+  return names.length > 0 ? `${names.join(" and ")} ` : "";
 }
 
 const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
@@ -100,7 +106,7 @@ export function CleanupConfirmation({
     <div className="mx-auto max-w-2xl px-8 py-10">
       <h2 className="mb-1 text-lg font-semibold text-slate-800">Ready to clean up</h2>
       <p className="mb-6 text-sm text-slate-500">
-        Choose how the selected {result ? selectedCloudNames(result.summary) : "the selected"} data should be removed.
+        Choose how the selected {result ? selectedCloudNames(result.summary) : ""}data should be removed.
       </p>
 
       {loadError ? (
@@ -217,8 +223,8 @@ export function CleanupConfirmation({
 
               <p className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
                 {deletionMode === "permanent"
-                  ? `The selected ${selectedCloudNames(result.summary)} data will be permanently deleted — removed from the recycle bin / Deleted Items immediately, not just moved there. This covers everything currently in the selected resources when the job runs, not only what's listed above. This action cannot be undone.`
-                  : `The selected ${selectedCloudNames(result.summary)} data will be moved to the recycle bin / Deleted Items. This covers everything currently in the selected resources when the job runs, not only what's listed above.`}{" "}
+                  ? `The selected ${selectedCloudNames(result.summary)}data will be permanently deleted — removed from the recycle bin / Deleted Items immediately, not just moved there. This covers everything currently in the selected resources when the job runs, not only what's listed above. This action cannot be undone.`
+                  : `The selected ${selectedCloudNames(result.summary)}data will be moved to the recycle bin / Deleted Items. This covers everything currently in the selected resources when the job runs, not only what's listed above.`}{" "}
                 Make sure you have reviewed your selection before continuing.
               </p>
 
