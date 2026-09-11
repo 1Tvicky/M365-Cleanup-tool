@@ -93,7 +93,7 @@ export function TeamsChannels({
   }
 
   return (
-    <div className="overflow-hidden rounded-xl border border-slate-200 bg-white">
+    <div className="flex max-h-[65vh] flex-col overflow-hidden rounded-xl border border-slate-200 bg-white">
       <div className="border-b border-slate-100 px-4 py-3">
         <input
           type="search"
@@ -111,57 +111,59 @@ export function TeamsChannels({
       ) : teams.length === 0 ? (
         <p className="px-4 py-8 text-center text-sm text-slate-500">No teams found yet.</p>
       ) : (
-        <div className="divide-y divide-slate-100">
-          {teams.map((team) => {
-            const isExpanded = expanded.has(team.teamId);
-            const teamStatus = teamMessageLabel(team.channels);
-            const teamSelected = selectedTeams.has(team.teamId);
+        <div className="overflow-y-auto overflow-x-auto">
+          <div className="divide-y divide-slate-100">
+            {teams.map((team) => {
+              const isExpanded = expanded.has(team.teamId);
+              const teamStatus = teamMessageLabel(team.channels);
+              const teamSelected = selectedTeams.has(team.teamId);
 
-            return (
-              <div key={team.teamId}>
-                <div className="flex items-center gap-3 px-4 py-3">
-                  <input
-                    type="checkbox"
-                    checked={teamSelected}
-                    onChange={() => onToggleTeam(team.teamId, team.teamName, team.channels.length)}
-                    aria-label={`Delete the whole ${team.teamName} team`}
-                  />
-                  <button onClick={() => toggleExpand(team.teamId)} className="flex flex-1 items-center gap-2 text-left">
-                    <span className={`inline-block text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>▶</span>
-                    <span className="text-sm font-semibold text-slate-800">{team.teamName}</span>
-                    <span className="text-xs text-slate-400">{team.channels.length} channel{team.channels.length === 1 ? "" : "s"}</span>
-                  </button>
-                  {teamSelected ? (
-                    <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-600">Whole team will be deleted</span>
-                  ) : (
-                    <span className={`text-sm ${teamStatus.className}`}>{teamStatus.text}</span>
+              return (
+                <div key={team.teamId}>
+                  <div className="flex items-center gap-3 px-4 py-3">
+                    <input
+                      type="checkbox"
+                      checked={teamSelected}
+                      onChange={() => onToggleTeam(team.teamId, team.teamName, team.channels.length)}
+                      aria-label={`Delete the whole ${team.teamName} team`}
+                    />
+                    <button onClick={() => toggleExpand(team.teamId)} className="flex flex-1 items-center gap-2 text-left">
+                      <span className={`inline-block text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>▶</span>
+                      <span className="text-sm font-semibold text-slate-800">{team.teamName}</span>
+                      <span className="text-xs text-slate-400">{team.channels.length} channel{team.channels.length === 1 ? "" : "s"}</span>
+                    </button>
+                    {teamSelected ? (
+                      <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-600">Whole team will be deleted</span>
+                    ) : (
+                      <span className={`text-sm ${teamStatus.className}`}>{teamStatus.text}</span>
+                    )}
+                  </div>
+                  {isExpanded && (
+                    <div className="bg-slate-50/60 pb-2 pl-11 pr-4">
+                      {teamSelected && (
+                        <p className="py-1.5 text-xs italic text-slate-500">
+                          These channels are included in the Team deletion above — individual selection is disabled.
+                        </p>
+                      )}
+                      {team.channels.map((ch) => (
+                        <div key={ch.id} className="flex items-center gap-3 py-1.5">
+                          <input
+                            type="checkbox"
+                            checked={teamSelected || selected.has(ch.id)}
+                            disabled={teamSelected}
+                            onChange={() => onToggle(ch.id)}
+                            aria-label={`Select ${ch.channelName}`}
+                          />
+                          <span className={`flex-1 text-sm ${teamSelected ? "text-slate-400" : "text-slate-700"}`}>{ch.channelName}</span>
+                          <span className={`text-xs ${statusColor(ch.countStatus)}`}>{messageCountLabel(ch)}</span>
+                        </div>
+                      ))}
+                    </div>
                   )}
                 </div>
-                {isExpanded && (
-                  <div className="bg-slate-50/60 pb-2 pl-11 pr-4">
-                    {teamSelected && (
-                      <p className="py-1.5 text-xs italic text-slate-500">
-                        These channels are included in the Team deletion above — individual selection is disabled.
-                      </p>
-                    )}
-                    {team.channels.map((ch) => (
-                      <div key={ch.id} className="flex items-center gap-3 py-1.5">
-                        <input
-                          type="checkbox"
-                          checked={teamSelected || selected.has(ch.id)}
-                          disabled={teamSelected}
-                          onChange={() => onToggle(ch.id)}
-                          aria-label={`Select ${ch.channelName}`}
-                        />
-                        <span className={`flex-1 text-sm ${teamSelected ? "text-slate-400" : "text-slate-700"}`}>{ch.channelName}</span>
-                        <span className={`text-xs ${statusColor(ch.countStatus)}`}>{messageCountLabel(ch)}</span>
-                      </div>
-                    ))}
-                  </div>
-                )}
-              </div>
-            );
-          })}
+              );
+            })}
+          </div>
         </div>
       )}
 
