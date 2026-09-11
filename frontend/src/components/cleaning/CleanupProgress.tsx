@@ -37,6 +37,7 @@ const CATEGORY_LABEL: Record<string, string> = {
   outlook_calendar: "Outlook Calendar",
   outlook_contacts: "Outlook Contacts",
   channel: "Teams Channels",
+  team: "Microsoft Teams (whole team)",
   chat: "Direct Messages",
   google_my_drive_account: "Google My Drive",
   shared_drive: "Google Shared Drives",
@@ -62,8 +63,25 @@ const ITEM_STATUS_STYLE: Record<CleanupOperationItemRow["status"], { label: stri
 // when the operator chose permanent deletion for the rest of the operation.
 const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox", "google_my_drive_account", "shared_drive", "gmail_mailbox"]);
 
+/**
+ * Team/Channel/Space deletion never consult deletion_mode at all (see cleanupExecutionWorker.ts's
+ * executeAnyItem / googleChatCleanupExecution.ts) — they're always the one real delete Microsoft/
+ * Google expose, regardless of which recycle-bin/permanent radio the operator picked. So these get
+ * their own unconditional labels instead of ever reading as the generic, mode-dependent "Removed" /
+ * "Permanently Deleted" — a completed Space must never read as "Messages Deleted" (this is a Space
+ * delete, not a message delete) or imply it's recoverable.
+ */
+const UNCONDITIONAL_COMPLETED_LABEL: Partial<Record<CleanupResourceType, string>> = {
+  team: "Team Deleted",
+  channel: "Channel Deleted",
+  google_chat_space: "Space Deleted",
+};
+
 function itemStatusLabel(item: { status: CleanupOperationItemRow["status"]; resourceType: CleanupResourceType }, deletionMode: CleanupDeletionMode): string {
-  if (item.status === "completed" && deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";
+  if (item.status === "completed") {
+    if (UNCONDITIONAL_COMPLETED_LABEL[item.resourceType]) return UNCONDITIONAL_COMPLETED_LABEL[item.resourceType]!;
+    if (deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";
+  }
   return ITEM_STATUS_STYLE[item.status].label;
 }
 

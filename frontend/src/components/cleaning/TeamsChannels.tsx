@@ -33,6 +33,14 @@ function teamMessageLabel(channels: CleaningChannelRow[]): { text: string; class
   return { text: "Waiting to be calculated", className: "text-slate-400 italic" };
 }
 
+/**
+ * Team → Channel hierarchy. The team row's own checkbox means "delete the whole Team" (removes
+ * the Team and every channel under it) — a distinct selection from picking individual channels,
+ * never a "select all channels in this team" shortcut the way it used to be. Channel checkboxes
+ * stay exactly as before for "delete just this one channel, keep the Team" — but are disabled
+ * (with an explanatory note) while their parent Team is selected, since the Team deletion already
+ * covers them; toggling a channel never also toggles the Team, and vice versa.
+ */
 export function TeamsChannels({
   channels,
   loading,
@@ -41,6 +49,7 @@ export function TeamsChannels({
   onSearchChange,
   selected,
   onToggle,
+  selectedTeams,
   onToggleTeam,
 }: {
   channels: CleaningChannelRow[];
@@ -50,7 +59,9 @@ export function TeamsChannels({
   onSearchChange: (value: string) => void;
   selected: Set<string>;
   onToggle: (channelId: string) => void;
-  onToggleTeam: (channelIds: string[]) => void;
+  /** team_id values currently selected for whole-Team deletion. */
+  selectedTeams: Set<string>;
+  onToggleTeam: (teamId: string, teamName: string, channelCount: number) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -94,26 +105,45 @@ export function TeamsChannels({
           {teams.map((team) => {
             const isExpanded = expanded.has(team.teamId);
             const teamStatus = teamMessageLabel(team.channels);
-            const channelIds = team.channels.map((c) => c.id);
-            const allSelected = channelIds.every((id) => selected.has(id));
+            const teamSelected = selectedTeams.has(team.teamId);
 
             return (
               <div key={team.teamId}>
                 <div className="flex items-center gap-3 px-4 py-3">
-                  <input type="checkbox" checked={allSelected} onChange={() => onToggleTeam(channelIds)} aria-label={`Select all channels in ${team.teamName}`} />
+                  <input
+                    type="checkbox"
+                    checked={teamSelected}
+                    onChange={() => onToggleTeam(team.teamId, team.teamName, team.channels.length)}
+                    aria-label={`Delete the whole ${team.teamName} team`}
+                  />
                   <button onClick={() => toggleExpand(team.teamId)} className="flex flex-1 items-center gap-2 text-left">
                     <span className={`inline-block text-slate-400 transition-transform ${isExpanded ? "rotate-90" : ""}`}>▶</span>
                     <span className="text-sm font-semibold text-slate-800">{team.teamName}</span>
                     <span className="text-xs text-slate-400">{team.channels.length} channel{team.channels.length === 1 ? "" : "s"}</span>
                   </button>
-                  <span className={`text-sm ${teamStatus.className}`}>{teamStatus.text}</span>
+                  {teamSelected ? (
+                    <span className="rounded-full bg-rose-50 px-2 py-0.5 text-xs font-medium text-rose-600">Whole team will be deleted</span>
+                  ) : (
+                    <span className={`text-sm ${teamStatus.className}`}>{teamStatus.text}</span>
+                  )}
                 </div>
                 {isExpanded && (
                   <div className="bg-slate-50/60 pb-2 pl-11 pr-4">
+                    {teamSelected && (
+                      <p className="py-1.5 text-xs italic text-slate-500">
+                        These channels are included in the Team deletion above — individual selection is disabled.
+                      </p>
+                    )}
                     {team.channels.map((ch) => (
                       <div key={ch.id} className="flex items-center gap-3 py-1.5">
-                        <input type="checkbox" checked={selected.has(ch.id)} onChange={() => onToggle(ch.id)} aria-label={`Select ${ch.channelName}`} />
-                        <span className="flex-1 text-sm text-slate-700">{ch.channelName}</span>
+                        <input
+                          type="checkbox"
+                          checked={teamSelected || selected.has(ch.id)}
+                          disabled={teamSelected}
+                          onChange={() => onToggle(ch.id)}
+                          aria-label={`Select ${ch.channelName}`}
+                        />
+                        <span className={`flex-1 text-sm ${teamSelected ? "text-slate-400" : "text-slate-700"}`}>{ch.channelName}</span>
                         <span className={`text-xs ${statusColor(ch.countStatus)}`}>{messageCountLabel(ch)}</span>
                       </div>
                     ))}

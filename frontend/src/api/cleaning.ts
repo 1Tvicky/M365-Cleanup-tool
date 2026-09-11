@@ -65,6 +65,18 @@ export interface CleaningChannelRow {
   countStatus: CountStatus;
 }
 
+/**
+ * A whole Team, selected for whole-Team deletion — distinct from selecting its individual
+ * channels (CleaningChannelRow). There's no dedicated "list teams" endpoint; this is derived
+ * client-side by grouping the flat CleaningChannelRow[] list by teamId (see TeamsChannels.tsx),
+ * the same way the team_id/team_name columns are already denormalized onto every channel row.
+ */
+export interface CleaningTeamRow {
+  teamId: string;
+  teamName: string;
+  channelCount: number;
+}
+
 export interface CleaningChatRow {
   id: string;
   chatType: "oneOnOne" | "group" | "meeting" | "unknownFutureValue";
@@ -179,10 +191,12 @@ export function calculateTeamsMessageCounts(connectionId: string): Promise<{ sta
 }
 
 /**
- * Cleanup (deletion) execution. 'onedrive_account'/'sharepoint_site'/'outlook_mailbox' items are
- * ever actually removed — Microsoft Graph has no application-permission (unattended) path to
- * delete Teams channel or chat messages, so 'channel'/'chat' items always resolve to 'unsupported',
- * never a faked success. See the cleanup-execution plan for the full rationale.
+ * Cleanup (deletion) execution. 'chat' is the one resource type that always resolves to
+ * 'unsupported' — Microsoft Graph has no application-permission (unattended) path to delete 1:1/
+ * group chat messages, so a 'chat' item never runs, never a faked success. 'channel' (deletes one
+ * Teams channel) and 'team' (deletes the whole Team, which removes every channel under it) are
+ * both executed for real, as is 'google_chat_space' (deletes the whole Space, not just its
+ * messages). See the cleanup-execution plan for the full rationale.
  */
 export type CleanupResourceType =
   | "onedrive_account"
@@ -192,6 +206,7 @@ export type CleanupResourceType =
   | "outlook_contacts"
   | "channel"
   | "chat"
+  | "team"
   | "google_my_drive_account"
   | "shared_drive"
   | "gmail_mailbox"
@@ -208,6 +223,8 @@ export interface CleanupManifest {
   outlookContacts?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
+  /** Whole-Team deletion — ids are team_id (Graph group ids), not row ids; see backend/src/types/cleaning.ts's CleanupManifest comment. */
+  teams?: { connectionId: string; ids: string[] };
   googleMyDrive?: { connectionId: string; ids: string[] };
   sharedDrives?: { connectionId: string; ids: string[] };
   gmail?: { connectionId: string; ids: string[] };
@@ -224,6 +241,7 @@ export interface CleanupValidationResult {
     outlookContacts: number;
     channels: number;
     chats: number;
+    teams: number;
     googleMyDriveAccounts: number;
     sharedDrives: number;
     gmailMailboxes: number;
@@ -240,6 +258,7 @@ export interface CleanupValidationResult {
     outlookContacts: string[];
     channels: string[];
     chats: string[];
+    teams: string[];
     googleMyDrive: string[];
     sharedDrives: string[];
     gmail: string[];

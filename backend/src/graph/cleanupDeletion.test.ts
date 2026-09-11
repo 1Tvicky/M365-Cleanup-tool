@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import type { Client } from "@microsoft/microsoft-graph-client";
-import { classifyDeleteError, deleteCalendarEvent, deleteContact, deleteDriveItem, deleteMessage } from "./cleanupDeletion.js";
+import { classifyDeleteError, deleteCalendarEvent, deleteContact, deleteDriveItem, deleteMessage, deleteTeam, deleteTeamsChannel } from "./cleanupDeletion.js";
 
 describe("classifyDeleteError", () => {
   it("classifies 403 as an insufficient-permission failure", () => {
@@ -148,5 +148,64 @@ describe("deleteCalendarEvent / deleteContact stay on plain soft delete", () => 
     expect(calls[0]!.verb).toBe("delete");
     expect(calls[0]!.path).toBe("/users/user-1/contacts/contact-1");
     expect(calls[0]!.path).not.toMatch(/permanentDelete/);
+  });
+});
+
+describe("deleteTeamsChannel", () => {
+  it("calls DELETE /teams/{teamId}/channels/{channelId} — the channel delete API, not a message-delete path", async () => {
+    const { client, calls } = fakeClient(() => Promise.resolve());
+    const result = await deleteTeamsChannel(client, "team-1", "channel-1");
+
+    expect(result).toBe("deleted");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.verb).toBe("delete");
+    expect(calls[0]!.path).toBe("/teams/team-1/channels/channel-1");
+  });
+
+  it("never touches a different team's channel with the same channel id", async () => {
+    const { client, calls } = fakeClient(() => Promise.resolve());
+    await deleteTeamsChannel(client, "team-A", "channel-1");
+    expect(calls[0]!.path).toBe("/teams/team-A/channels/channel-1");
+    expect(calls[0]!.path).not.toContain("team-B");
+  });
+
+  it("treats a 404 (already deleted) as already_gone, not a failure", async () => {
+    const { client } = fakeClient(() => Promise.reject({ statusCode: 404 }));
+    expect(await deleteTeamsChannel(client, "team-1", "channel-1")).toBe("already_gone");
+  });
+
+  it("propagates a non-404 error (e.g. insufficient permission) unchanged, still classifiable", async () => {
+    const { client } = fakeClient(() => Promise.reject({ statusCode: 403 }));
+    await expect(deleteTeamsChannel(client, "team-1", "channel-1")).rejects.toMatchObject({ statusCode: 403 });
+    expect(classifyDeleteError({ statusCode: 403 }).code).toBe("INSUFFICIENT_PERMISSION");
+  });
+
+  it("rejects with an invalid-resource-style error for a malformed/invalid channel id, and it's still classifiable", async () => {
+    const { client } = fakeClient(() => Promise.reject({ statusCode: 400, message: "Invalid channel id" }));
+    await expect(deleteTeamsChannel(client, "team-1", "not-a-real-channel")).rejects.toMatchObject({ statusCode: 400 });
+  });
+});
+
+describe("deleteTeam", () => {
+  it("calls DELETE /groups/{id} — deletes the Team's backing M365 Group, never a channel path", async () => {
+    const { client, calls } = fakeClient(() => Promise.resolve());
+    const result = await deleteTeam(client, "team-1");
+
+    expect(result).toBe("deleted");
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.verb).toBe("delete");
+    expect(calls[0]!.path).toBe("/groups/team-1");
+    expect(calls[0]!.path).not.toMatch(/channels/);
+  });
+
+  it("treats a 404 (already deleted) as already_gone, not a failure", async () => {
+    const { client } = fakeClient(() => Promise.reject({ statusCode: 404 }));
+    expect(await deleteTeam(client, "team-1")).toBe("already_gone");
+  });
+
+  it("propagates a non-404 error (e.g. insufficient permission) unchanged, still classifiable", async () => {
+    const { client } = fakeClient(() => Promise.reject({ statusCode: 403 }));
+    await expect(deleteTeam(client, "team-1")).rejects.toMatchObject({ statusCode: 403 });
+    expect(classifyDeleteError({ statusCode: 403 }).code).toBe("INSUFFICIENT_PERMISSION");
   });
 });

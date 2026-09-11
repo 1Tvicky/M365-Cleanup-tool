@@ -18,6 +18,8 @@ export interface SelectionTotals {
   teamsMessages: number;
   /** How many of the selected channels have an actual computed count — lets the summary tell "0 messages" (genuinely counted) apart from "count not known yet" for the same selection. */
   teamsChannelsWithKnownCount: number;
+  /** Whole Teams selected for deletion (Team + all its channels) — a distinct count from teamsChannels, which only ever holds individually-selected channels (see buildCleanupManifest's dedup). */
+  teams: number;
   dms: number;
   dmMessages: number;
   dmsWithKnownCount: number;
@@ -45,6 +47,7 @@ export function hasSelection(t: SelectionTotals): boolean {
       t.outlookCalendarUsers +
       t.outlookContactUsers +
       t.teamsChannels +
+      t.teams +
       t.dms +
       t.googleMyDriveAccounts +
       t.sharedDrives +
@@ -70,6 +73,7 @@ export function SelectionSummary({ totals, onReview }: { totals: SelectionTotals
     parts.push(
       `${totals.teamsChannels.toLocaleString()} Teams channel${totals.teamsChannels === 1 ? "" : "s"} · ${messagesFragment(totals.teamsChannels, totals.teamsChannelsWithKnownCount, totals.teamsMessages)}`
     );
+  if (totals.teams > 0) parts.push(`${totals.teams.toLocaleString()} whole Team${totals.teams === 1 ? "" : "s"} (all channels)`);
   if (totals.dms > 0)
     parts.push(`${totals.dms.toLocaleString()} conversation${totals.dms === 1 ? "" : "s"} · ${messagesFragment(totals.dms, totals.dmsWithKnownCount, totals.dmMessages)}`);
   if (totals.googleMyDriveAccounts > 0)

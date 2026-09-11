@@ -25,6 +25,7 @@ import {
   type CleaningResourceRow,
   type CleaningSyncOperation,
   type CleaningSyncResourceStatus,
+  type CleaningTeamRow,
   type CleaningTeamsSummary,
   type CleanupManifest,
   type OutlookMailboxOverviewRow,
@@ -165,7 +166,16 @@ function pruneToFound<T>(map: Map<string, T>, foundIds: string[]): Map<string, T
   return next;
 }
 
-/** Only 'oneDrive'/'sharePoint'/'outlook'/'outlookCalendar'/'outlookContacts' slots ever lead to a real Graph delete — 'channels'/'chats' always resolve to 'unsupported' server-side (see CleanupConfirmation), but are still included so the confirmation screen can show them transparently rather than silently dropping them. */
+/**
+ * 'oneDrive'/'sharePoint'/'outlook'/'outlookCalendar'/'outlookContacts'/'teams'/'googleChat' slots
+ * lead to a real delete; 'chats' always resolves to 'unsupported' server-side (see
+ * CleanupConfirmation), but is still included so the confirmation screen can show it transparently
+ * rather than silently dropping it. A channel whose parent Team is also selected is deliberately
+ * left out of `channels` here — the Team deletion already covers it, and sending both would risk
+ * the server seeing two overlapping delete operations for the same channel; `selectedTeams`'s own
+ * onToggleTeam handler already keeps such channels out of the selection Map in the first place, so
+ * this filter is a second, belt-and-braces guard against the same duplication.
+ */
 function buildCleanupManifest(
   group: TenantGroup,
   selectedOneDrive: Map<string, CleaningResourceRow>,
@@ -174,6 +184,7 @@ function buildCleanupManifest(
   selectedOutlookCalendar: Map<string, CleaningResourceRow>,
   selectedOutlookContacts: Map<string, CleaningResourceRow>,
   selectedChannels: Map<string, CleaningChannelRow>,
+  selectedTeams: Map<string, CleaningTeamRow>,
   selectedChats: Map<string, CleaningChatRow>,
   selectedGoogleMyDrive: Map<string, CleaningResourceRow>,
   selectedSharedDrives: Map<string, CleaningResourceRow>,
@@ -186,7 +197,9 @@ function buildCleanupManifest(
   if (selectedOutlook.size > 0 && group.outlook) manifest.outlook = { connectionId: group.outlook.id, ids: [...selectedOutlook.keys()] };
   if (selectedOutlookCalendar.size > 0 && group.outlook) manifest.outlookCalendar = { connectionId: group.outlook.id, ids: [...selectedOutlookCalendar.keys()] };
   if (selectedOutlookContacts.size > 0 && group.outlook) manifest.outlookContacts = { connectionId: group.outlook.id, ids: [...selectedOutlookContacts.keys()] };
-  if (selectedChannels.size > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: [...selectedChannels.keys()] };
+  const nonTeamChannels = [...selectedChannels.entries()].filter(([, ch]) => !selectedTeams.has(ch.teamId)).map(([id]) => id);
+  if (nonTeamChannels.length > 0 && group.teams) manifest.channels = { connectionId: group.teams.id, ids: nonTeamChannels };
+  if (selectedTeams.size > 0 && group.teams) manifest.teams = { connectionId: group.teams.id, ids: [...selectedTeams.keys()] };
   if (selectedChats.size > 0 && group.teams) manifest.chats = { connectionId: group.teams.id, ids: [...selectedChats.keys()] };
   if (selectedGoogleMyDrive.size > 0 && group.google_my_drive) manifest.googleMyDrive = { connectionId: group.google_my_drive.id, ids: [...selectedGoogleMyDrive.keys()] };
   if (selectedSharedDrives.size > 0 && group.shared_drive) manifest.sharedDrives = { connectionId: group.shared_drive.id, ids: [...selectedSharedDrives.keys()] };
@@ -235,6 +248,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
   const [selectedOutlookCalendar, setSelectedOutlookCalendar] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedOutlookContacts, setSelectedOutlookContacts] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedChannels, setSelectedChannels] = useState<Map<string, CleaningChannelRow>>(new Map());
+  const [selectedTeams, setSelectedTeams] = useState<Map<string, CleaningTeamRow>>(new Map());
   const [selectedChats, setSelectedChats] = useState<Map<string, CleaningChatRow>>(new Map());
   const [selectedGoogleMyDrive, setSelectedGoogleMyDrive] = useState<Map<string, CleaningResourceRow>>(new Map());
   const [selectedSharedDrives, setSelectedSharedDrives] = useState<Map<string, CleaningResourceRow>>(new Map());
@@ -311,6 +325,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedOutlookCalendar,
       selectedOutlookContacts,
       selectedChannels,
+      selectedTeams,
       selectedChats,
       selectedGoogleMyDrive,
       selectedSharedDrives,
@@ -327,6 +342,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         (selectedOutlookCalendar.size - foundIds.outlookCalendar.length) +
         (selectedOutlookContacts.size - foundIds.outlookContacts.length) +
         (selectedChannels.size - foundIds.channels.length) +
+        (selectedTeams.size - foundIds.teams.length) +
         (selectedChats.size - foundIds.chats.length) +
         (selectedGoogleMyDrive.size - foundIds.googleMyDrive.length) +
         (selectedSharedDrives.size - foundIds.sharedDrives.length) +
@@ -339,6 +355,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
         setSelectedOutlookCalendar((prev) => pruneToFound(prev, foundIds.outlookCalendar));
         setSelectedOutlookContacts((prev) => pruneToFound(prev, foundIds.outlookContacts));
         setSelectedChannels((prev) => pruneToFound(prev, foundIds.channels));
+        setSelectedTeams((prev) => pruneToFound(prev, foundIds.teams));
         setSelectedChats((prev) => pruneToFound(prev, foundIds.chats));
         setSelectedGoogleMyDrive((prev) => pruneToFound(prev, foundIds.googleMyDrive));
         setSelectedSharedDrives((prev) => pruneToFound(prev, foundIds.sharedDrives));
@@ -368,6 +385,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       teamsChannels: selectedChannels.size,
       teamsMessages: [...selectedChannels.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       teamsChannelsWithKnownCount: [...selectedChannels.values()].filter((r) => r.countStatus === "completed").length,
+      teams: selectedTeams.size,
       dms: selectedChats.size,
       dmMessages: [...selectedChats.values()].reduce((s, r) => s + (r.countStatus === "completed" ? r.messageCount ?? 0 : 0), 0),
       dmsWithKnownCount: [...selectedChats.values()].filter((r) => r.countStatus === "completed").length,
@@ -386,6 +404,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
       selectedOutlookCalendar,
       selectedOutlookContacts,
       selectedChannels,
+      selectedTeams,
       selectedChats,
       selectedGoogleMyDrive,
       selectedSharedDrives,
@@ -403,6 +422,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     setSelectedOutlookCalendar(new Map());
     setSelectedOutlookContacts(new Map());
     setSelectedChannels(new Map());
+    setSelectedTeams(new Map());
     setSelectedChats(new Map());
     setSelectedGoogleMyDrive(new Map());
     setSelectedSharedDrives(new Map());
@@ -439,6 +459,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           selectedOutlookCalendar,
           selectedOutlookContacts,
           selectedChannels,
+          selectedTeams,
           selectedChats,
           selectedGoogleMyDrive,
           selectedSharedDrives,
@@ -479,6 +500,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
           setSelectedOutlookCalendar(new Map());
           setSelectedOutlookContacts(new Map());
           setSelectedChannels(new Map());
+          setSelectedTeams(new Map());
           setSelectedChats(new Map());
           setSelectedGoogleMyDrive(new Map());
           setSelectedSharedDrives(new Map());
@@ -574,6 +596,8 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
             setSelectedChannels={setSelectedChannels}
             selectedChats={selectedChats}
             setSelectedChats={setSelectedChats}
+            selectedTeams={selectedTeams}
+            setSelectedTeams={setSelectedTeams}
           />
         )}
 
@@ -1775,6 +1799,8 @@ function TeamsView({
   setSelectedChannels,
   selectedChats,
   setSelectedChats,
+  selectedTeams,
+  setSelectedTeams,
 }: {
   connectionId: string;
   tab: "channels" | "dms";
@@ -1783,6 +1809,8 @@ function TeamsView({
   setSelectedChannels: (m: Map<string, CleaningChannelRow>) => void;
   selectedChats: Map<string, CleaningChatRow>;
   setSelectedChats: (m: Map<string, CleaningChatRow>) => void;
+  selectedTeams: Map<string, CleaningTeamRow>;
+  setSelectedTeams: (m: Map<string, CleaningTeamRow>) => void;
 }) {
   const [search, setSearch] = useState("");
   const [channels, setChannels] = useState<CleaningChannelRow[]>([]);
@@ -1906,15 +1934,24 @@ function TeamsView({
             const row = channels.find((c) => c.id === id);
             if (row) toggleInMap(selectedChannels, setSelectedChannels, id, row);
           }}
-          onToggleTeam={(ids) => {
-            const allSelected = ids.every((id) => selectedChannels.has(id));
-            const next = new Map(selectedChannels);
-            for (const id of ids) {
-              const row = channels.find((c) => c.id === id);
-              if (!row) continue;
-              allSelected ? next.delete(id) : next.set(id, row);
+          selectedTeams={new Set(selectedTeams.keys())}
+          onToggleTeam={(teamId, teamName, channelCount) => {
+            const nextTeams = new Map(selectedTeams);
+            if (nextTeams.has(teamId)) {
+              nextTeams.delete(teamId);
+            } else {
+              nextTeams.set(teamId, { teamId, teamName, channelCount });
+              // Whole-Team deletion already covers every channel under it — clear any of this
+              // team's channels that were individually selected, so the selection/manifest never
+              // double-counts a channel under both a Team-level and a channel-level entry.
+              const teamChannelIds = channels.filter((c) => c.teamId === teamId).map((c) => c.id);
+              if (teamChannelIds.some((id) => selectedChannels.has(id))) {
+                const nextChannels = new Map(selectedChannels);
+                for (const id of teamChannelIds) nextChannels.delete(id);
+                setSelectedChannels(nextChannels);
+              }
             }
-            setSelectedChannels(next);
+            setSelectedTeams(nextTeams);
           }}
         />
       ) : (
@@ -2086,6 +2123,12 @@ function ReviewPage({
           selectedContacts={selectedOutlookContacts}
           setSelectedContacts={setSelectedOutlookContacts}
         />
+        {totals.teams > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <span className="text-sm font-medium text-slate-700">Microsoft Teams (whole team)</span>
+            <span className="text-sm text-slate-600">{totals.teams.toLocaleString()} team{totals.teams === 1 ? "" : "s"} — Team and all channels will be deleted</span>
+          </div>
+        )}
         {totals.teamsChannels > 0 && (
           <div className="flex items-center justify-between border-b border-slate-100 pb-3">
             <span className="text-sm font-medium text-slate-700">Teams Channels</span>

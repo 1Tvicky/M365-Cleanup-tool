@@ -11,12 +11,13 @@ import type { Client } from "@microsoft/microsoft-graph-client";
  * as of this file's deleteDriveItem/deleteMessage, a genuine *permanent* delete path too (Graph's
  * `permanentDelete` action, GA, called directly on the same resource id as a straight alternative to
  * plain DELETE rather than a required follow-up to it — no recycle-bin lookup step exists or is
- * needed). Deleting a Teams channel or chat *message* requires a delegated (signed-in user present)
- * permission — Microsoft Graph does not support it for an unattended application-only service like
- * this one — so there are no equivalent functions here for channels/chats; callers must mark those
- * items 'unsupported' without ever calling Graph for them. Calendar/Contacts (deleteCalendarEvent/
- * deleteContact below) deliberately remain plain soft-delete — permanent deletion is scoped to
- * OneDrive/SharePoint/Outlook-mail only.
+ * needed). Teams channels and whole Teams (deleteTeamsChannel/deleteTeam below) also have a real
+ * application-permission delete path and are executed for real. Deleting a chat *message* (1:1 or
+ * group) is the one operation that still has no application-permission path at all — Microsoft
+ * Graph requires a delegated (signed-in user present) permission for that, so there is no
+ * equivalent function here for chats; callers must mark those items 'unsupported' without ever
+ * calling Graph for them. Calendar/Contacts (deleteCalendarEvent/deleteContact below) deliberately
+ * remain plain soft-delete — permanent deletion is scoped to OneDrive/SharePoint/Outlook-mail only.
  */
 
 export type DriveOwnerKind = "user" | "site";
@@ -357,6 +358,46 @@ export async function listFolderContacts(client: Client, userId: string, folderI
 export async function deleteContact(client: Client, userId: string, contactId: string): Promise<DriveItemDeleteResult> {
   try {
     await client.api(`/users/${userId}/contacts/${contactId}`).delete();
+    return "deleted";
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    throw err;
+  }
+}
+
+/**
+ * Microsoft Teams channel/Team deletion. Verified against the current Microsoft Graph reference
+ * docs (learn.microsoft.com/graph/api/channel-delete, /group-delete), not guessed:
+ *
+ * - Channel: `DELETE /teams/{teamId}/channels/{channelId}` — least-privileged application
+ *   permission is `Channel.Delete.All` (already configured for this app; see
+ *   docs/azure-ad-app-registration.md). Deletes only the named channel; the parent Team and its
+ *   other channels are untouched.
+ * - Team: Microsoft Graph has no separate "delete team" endpoint — a Team's identity IS its
+ *   backing Microsoft 365 Group, so deleting the Team means `DELETE /groups/{id}` (application
+ *   permission `Group.ReadWrite.All`, already configured). Per Graph's own docs this is a 30-day
+ *   recoverable soft-delete (the group moves to Azure AD's "deleted items" container) — the same
+ *   recoverability model as every other Graph delete this app calls, not a special case. Deleting
+ *   the Group removes the Team and every channel under it as part of the same operation; this app
+ *   never separately deletes each channel first.
+ *
+ * Both follow the same 404-is-already-gone idempotency convention as every other delete function
+ * in this file.
+ */
+export async function deleteTeamsChannel(client: Client, teamId: string, channelId: string): Promise<DriveItemDeleteResult> {
+  try {
+    await client.api(`/teams/${teamId}/channels/${channelId}`).delete();
+    return "deleted";
+  } catch (err) {
+    if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";
+    throw err;
+  }
+}
+
+/** Deletes the Team by deleting its backing M365 Group — see the header comment above this section for why there's no separate "delete team" Graph call. */
+export async function deleteTeam(client: Client, teamId: string): Promise<DriveItemDeleteResult> {
+  try {
+    await client.api(`/groups/${teamId}`).delete();
     return "deleted";
   } catch (err) {
     if ((err as { statusCode?: number })?.statusCode === 404) return "already_gone";

@@ -7,6 +7,8 @@ import {
   deleteContact,
   deleteDriveItem,
   deleteMessage,
+  deleteTeam,
+  deleteTeamsChannel,
   listCalendarEvents,
   listDriveRootChildren,
   listFolderContacts,
@@ -29,10 +31,11 @@ import { executeGoogleChatSpaceItem } from "./googleChatCleanupExecution.js";
 /**
  * Mirrors jobs/cleaningScanWorker.ts's shape (same join-by-id pattern, same runThrottled usage,
  * same reauth-error branching, same connection_events logging), but for executing a confirmed
- * cleanup operation. Only 'onedrive_account'/'sharepoint_site'/'outlook_mailbox' items are ever
- * processed here — 'channel'/'chat' items are created with status='unsupported' at manifest time
- * (routes/cleaning.ts) and never selected by the `status = 'pending'` query below, so this worker
- * never attempts a Graph call Microsoft doesn't support for this app's application-only permissions.
+ * cleanup operation. 'chat' items are the one resource type never processed here — they're created
+ * with status='unsupported' at manifest time (routes/cleaning.ts) and never selected by the
+ * `status = 'pending'` query below, since Microsoft Graph has no application-permission path to
+ * delete 1:1/group chat messages. Every other resource type, including 'channel' (deletes one
+ * channel) and 'team' (deletes the whole Team via its backing M365 Group), is executed for real.
  *
  * All items in one operation share the same tenant (enforced at manifest-creation time), so only
  * one graphClientForTenant call is needed for the whole job, regardless of how many of the tenant's
@@ -70,11 +73,13 @@ export interface PendingItem {
     | "outlook_mailbox"
     | "outlook_calendar"
     | "outlook_contacts"
+    | "channel"
+    | "team"
     | "google_my_drive_account"
     | "shared_drive"
     | "gmail_mailbox"
     | "google_chat_space";
-  graph_ref: { userId?: string; siteId?: string; userEmail?: string; driveId?: string; spaceId?: string };
+  graph_ref: { userId?: string; siteId?: string; userEmail?: string; driveId?: string; spaceId?: string; teamId?: string; channelId?: string };
   /** This item's own connection's admin_upn — only populated/used for Google items where the impersonation subject isn't the item's own graph_ref (e.g. shared_drive, which has no owning user). */
   admin_upn?: string;
 }
@@ -270,16 +275,39 @@ async function executeContactItem(
 }
 
 /**
+ * Deletes one Teams channel — never the parent Team. No sub-files/messages to enumerate (this is
+ * a direct resource delete, not a "clear its contents" operation like executeItem/executeMailboxItem
+ * above), so there's nothing to seed into cleanup_operation_item_files; the outer worker loop
+ * records this item's own success/failure directly from whether this promise resolves or rejects.
+ * "already_gone" (the channel was already deleted) resolves normally here, same as everywhere else
+ * in this file — there is no separate item-level "already_gone" status, so it's treated as the
+ * item having achieved its goal state, i.e. completed.
+ */
+async function executeChannelItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem): Promise<void> {
+  const teamId = item.graph_ref.teamId!;
+  const channelId = item.graph_ref.channelId!;
+  await deleteTeamsChannel(client, teamId, channelId);
+}
+
+/** Deletes the whole Team (its backing M365 Group) — see graph/cleanupDeletion.ts's deleteTeam for why there's no separate "delete team" Graph call. Same no-sub-files shape as executeChannelItem above. */
+async function executeTeamItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem): Promise<void> {
+  const teamId = item.graph_ref.teamId!;
+  await deleteTeam(client, teamId);
+}
+
+/**
  * Routes a pending item to the execution path for its resource type — executeItem only ever handles
  * onedrive_account/sharepoint_site, so Outlook's three resource kinds each get their own explicit
  * branch here rather than a shared switch-by-parameter helper. `permanent` is never consulted for
- * Calendar/Contacts — those two stay on plain soft delete regardless of the operation's
+ * Calendar/Contacts/channel/team — those stay on plain soft delete regardless of the operation's
  * deletion_mode (out of scope for permanent deletion; see graph/cleanupDeletion.ts).
  */
 function executeAnyItem(client: Awaited<ReturnType<typeof graphClientForTenant>>, item: PendingItem, operationId: string, permanent: boolean): Promise<void> {
   if (item.resource_type === "outlook_mailbox") return executeMailboxItem(client, item, operationId, permanent);
   if (item.resource_type === "outlook_calendar") return executeCalendarItem(client, item, operationId);
   if (item.resource_type === "outlook_contacts") return executeContactItem(client, item, operationId);
+  if (item.resource_type === "channel") return executeChannelItem(client, item);
+  if (item.resource_type === "team") return executeTeamItem(client, item);
   return executeItem(client, item, operationId, permanent);
 }
 

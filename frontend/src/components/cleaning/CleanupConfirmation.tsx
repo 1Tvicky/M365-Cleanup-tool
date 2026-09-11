@@ -21,6 +21,7 @@ function selectedCloudNames(summary: CleanupValidationResult["summary"]): string
   if (summary.oneDriveAccounts > 0) names.push("OneDrive");
   if (summary.sharePointSites > 0) names.push("SharePoint");
   if (summary.outlookMailboxes > 0 || summary.outlookCalendars > 0 || summary.outlookContacts > 0) names.push("Outlook");
+  if (summary.channels > 0 || summary.teams > 0) names.push("Microsoft Teams");
   if (summary.googleMyDriveAccounts > 0) names.push("Google My Drive");
   if (summary.sharedDrives > 0) names.push("Google Shared Drives");
   if (summary.gmailMailboxes > 0) names.push("Gmail");
@@ -36,6 +37,7 @@ const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message conversation",
+  team: "Microsoft Team",
   google_my_drive_account: "Google My Drive account",
   shared_drive: "Google Shared Drive",
   gmail_mailbox: "Gmail mailbox",
@@ -96,6 +98,8 @@ export function CleanupConfirmation({
     ? result.summary.oneDriveAccounts +
       result.summary.sharePointSites +
       result.summary.outlookMailboxes +
+      result.summary.channels +
+      result.summary.teams +
       result.summary.googleMyDriveAccounts +
       result.summary.sharedDrives +
       result.summary.gmailMailboxes +
@@ -143,6 +147,18 @@ export function CleanupConfirmation({
                 <span className="text-sm text-slate-600">{result.summary.outlookMailboxes.toLocaleString()}</span>
               </div>
             )}
+            {result.summary.teams > 0 && (
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-medium text-slate-700">Microsoft Teams (whole team, all channels)</span>
+                <span className="text-sm text-slate-600">{result.summary.teams.toLocaleString()}</span>
+              </div>
+            )}
+            {result.summary.channels > 0 && (
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-medium text-slate-700">Teams Channels</span>
+                <span className="text-sm text-slate-600">{result.summary.channels.toLocaleString()}</span>
+              </div>
+            )}
             {result.summary.googleMyDriveAccounts > 0 && (
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <span className="text-sm font-medium text-slate-700">Google My Drive Accounts</span>
@@ -176,7 +192,7 @@ export function CleanupConfirmation({
             <div className="mt-4 rounded-lg border border-amber-200 bg-amber-50 px-4 py-4 text-sm text-amber-800">
               <p className="mb-1 font-medium">Not supported yet</p>
               <p className="mb-2">
-                Microsoft doesn't currently allow this app to remove Teams channel or direct message content automatically. These{" "}
+                Microsoft doesn't currently allow this app to remove Teams direct message content automatically. These{" "}
                 {result.unsupported.length.toLocaleString()} item{result.unsupported.length === 1 ? "" : "s"} will be skipped:
               </p>
               <ul className="list-inside list-disc space-y-0.5">
@@ -186,6 +202,35 @@ export function CleanupConfirmation({
                   </li>
                 ))}
                 {result.unsupported.length > 8 && <li>…and {(result.unsupported.length - 8).toLocaleString()} more</li>}
+              </ul>
+            </div>
+          )}
+
+          {(result.summary.teams > 0 || result.summary.channels > 0 || result.summary.googleChatSpaces > 0) && (
+            <div className="mt-4 rounded-lg border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              <p className="mb-1 font-medium">Teams and Google Chat deletions are immediate and permanent</p>
+              <p>
+                These do not follow the recycle-bin/permanent choice below — Microsoft and Google don't offer a recoverable option for them:
+              </p>
+              <ul className="mt-1 list-inside list-disc space-y-0.5">
+                {result.summary.teams > 0 && (
+                  <li>
+                    <span className="font-medium">{result.summary.teams.toLocaleString()} whole Team{result.summary.teams === 1 ? "" : "s"}</span> —
+                    deletes the Team itself and every channel in it, not just its messages.
+                  </li>
+                )}
+                {result.summary.channels > 0 && (
+                  <li>
+                    <span className="font-medium">{result.summary.channels.toLocaleString()} Teams channel{result.summary.channels === 1 ? "" : "s"}</span> —
+                    deletes only the selected channel(s); the parent Team and its other channels are unaffected.
+                  </li>
+                )}
+                {result.summary.googleChatSpaces > 0 && (
+                  <li>
+                    <span className="font-medium">{result.summary.googleChatSpaces.toLocaleString()} Google Chat space{result.summary.googleChatSpaces === 1 ? "" : "s"}</span> —
+                    deletes the entire Space (all messages and memberships in it), not just its messages.
+                  </li>
+                )}
               </ul>
             </div>
           )}

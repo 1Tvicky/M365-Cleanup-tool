@@ -95,22 +95,38 @@ export type CleanupResourceType =
   | "outlook_mailbox"
   | "outlook_calendar"
   | "outlook_contacts"
+  /** A single Teams channel — DELETE /teams/{teamId}/channels/{channelId} (Channel.Delete.All). Deletes only the channel; the parent Team is untouched. */
   | "channel"
+  /** A 1:1/group Teams chat — selecting one always resolves as unsupported (see routes/cleaning.ts's chats block): Graph has no application-permission path to delete chat messages, and this app never deletes the chat itself either. Unrelated to and unaffected by "team"/"channel" support below. */
   | "chat"
+  /** A whole Microsoft Team — deletes the M365 Group backing it (DELETE /groups/{id}, Group.ReadWrite.All), which removes the Team and every channel under it per Graph/Entra semantics. Selecting a Team is a distinct manifest slot from selecting its channels — see resolveManifestItems' dedup of channels already covered by a selected Team. */
+  | "team"
   /** Google Workspace My Drive — a user's root Drive content, deleted via domain-wide delegation impersonating them. Same "select a user, delete their root-level content, never the account itself" granularity as onedrive_account. */
   | "google_my_drive_account"
   /** Google Shared Drive — the drive's top-level content, deleted via an admin-impersonated client (a Shared Drive has no owning user). Never deletes the Shared Drive itself — see graph/googleSharedDriveDeletion.ts. */
   | "shared_drive"
   /** Gmail — every message in the mailbox, never the mailbox/user/account. Uses aggregate counters only, never one DB row per message (a mailbox can hold millions) — see graph/gmailDeletion.ts. */
   | "gmail_mailbox"
-  /** Google Chat Space — every message, impersonating one human member (messages.list/delete have no admin-access bypass). Never deletes the Space itself. */
+  /** Google Chat Space — the whole Space itself (spaces.delete, useAdminAccess:true — a cascading delete that also removes its messages/memberships). See graph/googleChatDeletion.ts's deleteChatSpace. */
   | "google_chat_space";
 export type CleanupOperationStatus = "queued" | "running" | "completed" | "completed_with_errors" | "failed" | "cancelled";
 export type CleanupItemStatus = "pending" | "processing" | "completed" | "failed" | "skipped" | "unsupported";
 /** Chosen by the operator on the confirmation screen — see migrations/013_cleanup_deletion_mode.sql. Only OneDrive/SharePoint/Outlook-mail items ever consult this; Teams/Calendar/Contacts are unaffected either way. */
 export type CleanupDeletionMode = "recycle_bin" | "permanent";
 
-/** One slot per resource family; `ids` reference the same internal row ids already used by the existing selection state (connection_users.id / connection_outlook_calendars.id / connection_outlook_contacts.id / cleaning_channels.id / cleaning_chats.id) — never raw Microsoft Graph ids. */
+/**
+ * One slot per resource family; `ids` reference the same internal row ids already used by the
+ * existing selection state (connection_users.id / connection_outlook_calendars.id /
+ * connection_outlook_contacts.id / cleaning_channels.id / cleaning_chats.id) — never raw
+ * Microsoft Graph ids.
+ *
+ * `teams` is the one deliberate exception: there is no dedicated per-team row anywhere (a Team is
+ * only implicit as the distinct team_id values on cleaning_channels — see migrations/004), so
+ * `teams.ids` holds team_id (the Microsoft Graph/Entra group id) directly. This is still never
+ * trusted blindly — resolveManifestItems validates each id against cleaning_channels scoped to
+ * the given connectionId before treating it as real, the same access-proof every other slot gets
+ * via its row lookup.
+ */
 export interface CleanupManifest {
   oneDrive?: { connectionId: string; ids: string[] };
   sharePoint?: { connectionId: string; ids: string[] };
@@ -119,6 +135,8 @@ export interface CleanupManifest {
   outlookContacts?: { connectionId: string; ids: string[] };
   channels?: { connectionId: string; ids: string[] };
   chats?: { connectionId: string; ids: string[] };
+  /** Whole-Team deletion — ids are team_id (Graph group ids), not row ids; see the interface comment above. */
+  teams?: { connectionId: string; ids: string[] };
   googleMyDrive?: { connectionId: string; ids: string[] };
   sharedDrives?: { connectionId: string; ids: string[] };
   gmail?: { connectionId: string; ids: string[] };
@@ -135,6 +153,7 @@ export interface CleanupValidationResult {
     outlookContacts: number;
     channels: number;
     chats: number;
+    teams: number;
     googleMyDriveAccounts: number;
     sharedDrives: number;
     gmailMailboxes: number;
@@ -152,6 +171,7 @@ export interface CleanupValidationResult {
     outlookContacts: string[];
     channels: string[];
     chats: string[];
+    teams: string[];
     googleMyDrive: string[];
     sharedDrives: string[];
     gmail: string[];

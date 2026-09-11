@@ -23,6 +23,7 @@ const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
   outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message",
+  team: "Microsoft Team",
   google_my_drive_account: "Google My Drive account",
   shared_drive: "Google Shared Drive",
   gmail_mailbox: "Gmail mailbox",
@@ -44,8 +45,24 @@ const STATUS_STYLE: Record<CleanupItemStatus, { label: string; className: string
 // operation's deletion_mode.
 const PERMANENT_DELETE_RESOURCE_TYPES = new Set<CleanupResourceType>(["onedrive_account", "sharepoint_site", "outlook_mailbox", "google_my_drive_account", "shared_drive", "gmail_mailbox"]);
 
+/**
+ * Team/Channel/Space deletion never consult deletion_mode (see cleanupExecutionWorker.ts's
+ * executeAnyItem / googleChatCleanupExecution.ts) — always the one real delete Microsoft/Google
+ * expose, regardless of which recycle-bin/permanent radio the operator picked. A completed Space
+ * must never read as "Messages Deleted" (this was a Space delete, not a message delete) or imply
+ * it's recoverable, so these get unconditional labels instead of the generic mode-dependent ones.
+ */
+const UNCONDITIONAL_COMPLETED_LABEL: Partial<Record<CleanupResourceType, string>> = {
+  team: "Team Deleted",
+  channel: "Channel Deleted",
+  google_chat_space: "Space Deleted",
+};
+
 function itemStatusLabel(item: { status: CleanupItemStatus; resourceType: CleanupResourceType }, deletionMode: CleanupDeletionMode): string {
-  if (item.status === "completed" && deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";
+  if (item.status === "completed") {
+    if (UNCONDITIONAL_COMPLETED_LABEL[item.resourceType]) return UNCONDITIONAL_COMPLETED_LABEL[item.resourceType]!;
+    if (deletionMode === "permanent" && PERMANENT_DELETE_RESOURCE_TYPES.has(item.resourceType)) return "Permanently Deleted";
+  }
   return STATUS_STYLE[item.status].label;
 }
 

@@ -785,6 +785,11 @@ const cleanupManifestSchema = z.object({
   outlookContacts: manifestSlotSchema.optional(),
   channels: manifestSlotSchema.optional(),
   chats: manifestSlotSchema.optional(),
+  // teams.ids are team_id (Graph group ids), not row ids — still valid UUIDs (Entra object ids
+  // are GUIDs), so manifestSlotSchema's z.string().uuid() check applies unchanged. See
+  // CleanupManifest's interface comment in types/cleaning.ts for why this one slot is an id-shape
+  // exception.
+  teams: manifestSlotSchema.optional(),
   // Added when Google Workspace support landed — z.object() silently strips any key not listed
   // here (Zod's default "strip unknown keys" behavior), so omitting these wouldn't be a type
   // error (CleanupManifest's TS interface has no bearing on this schema's own field list) but
@@ -828,6 +833,7 @@ async function resolveManifestTenant(manifest: CleanupManifest, operatorId: stri
         manifest.outlookContacts?.connectionId,
         manifest.channels?.connectionId,
         manifest.chats?.connectionId,
+        manifest.teams?.connectionId,
         manifest.googleMyDrive?.connectionId,
         manifest.sharedDrives?.connectionId,
         manifest.gmail?.connectionId,
@@ -889,6 +895,7 @@ async function resolveManifestItems(
     outlookContacts: [],
     channels: [],
     chats: [],
+    teams: [],
     googleMyDrive: [],
     sharedDrives: [],
     gmail: [],
@@ -1024,6 +1031,40 @@ async function resolveManifestItems(
     }
   }
 
+  // Resolved before `channels` below so the channel loop can skip any channel already covered by
+  // a selected whole-Team deletion — see the dedup comment there.
+  let selectedTeamIds = new Set<string>();
+  if (manifest.teams) {
+    await requireConnectionAccess(manifest.teams.connectionId, operatorId, "teams");
+    // teams.ids are team_id (Graph group ids) directly — there's no dedicated per-team row to
+    // join against (see CleanupManifest's interface comment) — so this validates each id by
+    // proving at least one active, currently-synced channel under this connection has that
+    // team_id, which is exactly the same "does this belong to this connection" proof every other
+    // slot gets from its row lookup, just phrased as an EXISTS check instead of a primary-key one.
+    const result = await db.query<{ team_id: string; team_name: string }>(
+      `SELECT DISTINCT team_id, team_name FROM cleaning_channels WHERE connection_id = $1 AND is_active AND team_id = ANY($2::text[])`,
+      [manifest.teams.connectionId, manifest.teams.ids]
+    );
+    const found = new Map(result.rows.map((r) => [r.team_id, r]));
+    for (const teamId of manifest.teams.ids) {
+      const row = found.get(teamId);
+      if (!row) {
+        errors.push(`A selected Team is no longer available`);
+        continue;
+      }
+      items.push({
+        connectionId: manifest.teams.connectionId,
+        resourceType: "team",
+        resourceId: row.team_id,
+        displayName: row.team_name,
+        graphRef: { teamId: row.team_id },
+        supported: true,
+      });
+      foundIds.teams.push(row.team_id);
+    }
+    selectedTeamIds = new Set(foundIds.teams);
+  }
+
   if (manifest.channels) {
     await requireConnectionAccess(manifest.channels.connectionId, operatorId, "teams");
     const result = await db.query<{ id: string; team_id: string; team_name: string; channel_id: string; channel_name: string }>(
@@ -1037,14 +1078,23 @@ async function resolveManifestItems(
         errors.push(`A selected Teams channel is no longer available`);
         continue;
       }
+      // Deleting the parent Team already removes every channel under it (see deleteTeam's
+      // comment) — a channel whose team_id is also a selected Team would otherwise become a
+      // redundant, duplicate delete attempt (and a confusing double count in the report) on top
+      // of the Team-level operation. Still counted as "found" so the frontend's selection isn't
+      // dropped as stale, just not turned into its own cleanup_operation_items row.
+      if (selectedTeamIds.has(row.team_id)) {
+        foundIds.channels.push(row.id);
+        continue;
+      }
       items.push({
         connectionId: manifest.channels.connectionId,
         resourceType: "channel",
         resourceId: row.id,
         displayName: `${row.team_name} / ${row.channel_name}`,
         graphRef: { teamId: row.team_id, channelId: row.channel_id },
-        // Microsoft Graph has no application-permission (unattended) way to delete channel messages — delegated/signed-in-user only.
-        supported: false,
+        // DELETE /teams/{teamId}/channels/{channelId} — Channel.Delete.All (see graph/cleanupDeletion.ts's deleteTeamsChannel).
+        supported: true,
       });
       foundIds.channels.push(row.id);
     }
@@ -1070,7 +1120,9 @@ async function resolveManifestItems(
         resourceId: row.id,
         displayName: names || "Conversation",
         graphRef: { chatId: row.chat_id },
-        // Same Graph limitation as channel messages — no application-permission delete path exists.
+        // Microsoft Graph has no application-permission (unattended) way to delete 1:1/group chat
+        // messages — delegated/signed-in-user only. Unrelated to and unaffected by channel/Team
+        // support above: this is specifically about *chat* (not channel) messages.
         supported: false,
       });
       foundIds.chats.push(row.id);
@@ -1205,6 +1257,7 @@ function summarizeItems(items: ResolvedManifestItem[]): CleanupValidationResult[
     googleChatSpaces: items.filter((i) => i.resourceType === "google_chat_space").length,
     channels: items.filter((i) => i.resourceType === "channel").length,
     chats: items.filter((i) => i.resourceType === "chat").length,
+    teams: items.filter((i) => i.resourceType === "team").length,
   };
 }
 
@@ -1438,6 +1491,7 @@ const RESOURCE_TYPES: CleanupResourceType[] = [
   "outlook_contacts",
   "channel",
   "chat",
+  "team",
   "google_my_drive_account",
   "shared_drive",
   "gmail_mailbox",
@@ -1452,6 +1506,7 @@ const RESOURCE_TYPE_REPORT_LABEL: Record<CleanupResourceType, string> = {
   outlook_contacts: "Outlook contact",
   channel: "Teams channel",
   chat: "Direct message",
+  team: "Microsoft Team",
   google_my_drive_account: "Google My Drive account",
   shared_drive: "Google Shared Drive",
   gmail_mailbox: "Gmail mailbox",
@@ -1643,7 +1698,9 @@ function formatBytesForReport(bytes: number): string {
 function reportNote(status: string, errorMessage: string | null): string {
   if (errorMessage) return errorMessage;
   if (status === "unsupported") {
-    return "Not supported: Microsoft Graph has no application-permission (unattended) path to delete Teams channel/chat messages.";
+    // Only ever reached by "chat" items now — channels/Teams are executed for real (see
+    // resolveManifestItems' channels/teams blocks).
+    return "Not supported: Microsoft Graph has no application-permission (unattended) path to delete Teams chat messages.";
   }
   return "";
 }

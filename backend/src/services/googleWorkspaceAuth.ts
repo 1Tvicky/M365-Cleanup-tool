@@ -96,11 +96,19 @@ export async function getGmailClientAs(userEmail: string) {
 
 // Chat's admin-level space/membership enumeration and per-member message access are deliberately
 // separate scope sets (see graph/googleChatEnumeration.ts's header comment for why) — two distinct
-// impersonated-client helpers rather than one.
-const CHAT_ADMIN_SCOPES = ["https://www.googleapis.com/auth/chat.admin.spaces.readonly", "https://www.googleapis.com/auth/chat.admin.memberships.readonly"];
+// impersonated-client helpers rather than one. chat.admin.delete (added alongside the read-only
+// admin scopes) is required for spaces.delete({useAdminAccess:true}) — verified against the Chat
+// API reference; this must also be authorized as an OAuth scope for this service account in the
+// Workspace admin console's domain-wide delegation settings before whole-Space deletion will work
+// (see docs/google-workspace-integration.md), same as every other scope this app impersonates with.
+const CHAT_ADMIN_SCOPES = [
+  "https://www.googleapis.com/auth/chat.admin.spaces.readonly",
+  "https://www.googleapis.com/auth/chat.admin.memberships.readonly",
+  "https://www.googleapis.com/auth/chat.admin.delete",
+];
 const CHAT_MESSAGE_SCOPES = ["https://www.googleapis.com/auth/chat.messages"];
 
-/** A Chat API client impersonating the domain admin, with admin-level scopes — used to enumerate every space and space membership in the domain (spaces.search/members.list with useAdminAccess:true). Never used for message read/delete — see getChatClientAsMember. */
+/** A Chat API client impersonating the domain admin, with admin-level scopes — used to enumerate every space and space membership in the domain (spaces.search/members.list with useAdminAccess:true), and to delete a whole Space (spaces.delete with useAdminAccess:true). Never used for message read/delete — see getChatClientAsMember. */
 export async function getChatAdminClientAs(adminEmail: string) {
   const auth = await getImpersonatedClient(adminEmail, CHAT_ADMIN_SCOPES);
   return google.chat({ version: "v1", auth });
