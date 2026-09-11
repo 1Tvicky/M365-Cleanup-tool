@@ -17,7 +17,9 @@ function selectedCloudNames(summary: CleanupValidationResult["summary"]): string
   if (summary.outlookMailboxes > 0 || summary.outlookCalendars > 0 || summary.outlookContacts > 0) names.push("Outlook");
   if (summary.googleMyDriveAccounts > 0) names.push("Google My Drive");
   if (summary.sharedDrives > 0) names.push("Google Shared Drives");
-  return names.length > 0 ? names.join(" and ") : "Microsoft 365";
+  if (summary.gmailMailboxes > 0) names.push("Gmail");
+  if (summary.googleChatSpaces > 0) names.push("Google Chat");
+  return names.length > 0 ? names.join(" and ") : "the selected";
 }
 
 const RESOURCE_LABEL: Record<CleanupResourceType, string> = {
@@ -89,14 +91,16 @@ export function CleanupConfirmation({
       result.summary.sharePointSites +
       result.summary.outlookMailboxes +
       result.summary.googleMyDriveAccounts +
-      result.summary.sharedDrives
+      result.summary.sharedDrives +
+      result.summary.gmailMailboxes +
+      result.summary.googleChatSpaces
     : 0;
 
   return (
     <div className="mx-auto max-w-2xl px-8 py-10">
       <h2 className="mb-1 text-lg font-semibold text-slate-800">Ready to clean up</h2>
       <p className="mb-6 text-sm text-slate-500">
-        Choose how the selected {result ? selectedCloudNames(result.summary) : "Microsoft 365"} data should be removed.
+        Choose how the selected {result ? selectedCloudNames(result.summary) : "the selected"} data should be removed.
       </p>
 
       {loadError ? (
@@ -143,6 +147,18 @@ export function CleanupConfirmation({
               <div className="flex items-center justify-between border-b border-slate-100 pb-3">
                 <span className="text-sm font-medium text-slate-700">Google Shared Drives</span>
                 <span className="text-sm text-slate-600">{result.summary.sharedDrives.toLocaleString()}</span>
+              </div>
+            )}
+            {result.summary.gmailMailboxes > 0 && (
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-medium text-slate-700">Gmail Mailboxes</span>
+                <span className="text-sm text-slate-600">{result.summary.gmailMailboxes.toLocaleString()}</span>
+              </div>
+            )}
+            {result.summary.googleChatSpaces > 0 && (
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <span className="text-sm font-medium text-slate-700">Google Chat Spaces</span>
+                <span className="text-sm text-slate-600">{result.summary.googleChatSpaces.toLocaleString()}</span>
               </div>
             )}
             {executableCount === 0 && (

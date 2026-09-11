@@ -2057,7 +2057,7 @@ function ReviewPage({
   onBack: () => void;
   onContinue: () => void;
 }) {
-  const totalBytes = totals.oneDriveBytes + totals.sharePointBytes;
+  const totalBytes = totals.oneDriveBytes + totals.sharePointBytes + totals.googleMyDriveBytes + totals.sharedDrivesBytes;
   const totalMessages = totals.teamsMessages + totals.dmMessages;
 
   return (
@@ -2100,6 +2100,34 @@ function ReviewPage({
             <span className="text-sm text-slate-600">
               {totals.dms.toLocaleString()} conversations · {messagesFragment(totals.dms, totals.dmsWithKnownCount, totals.dmMessages)}
             </span>
+          </div>
+        )}
+        {totals.googleMyDriveAccounts > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <span className="text-sm font-medium text-slate-700">Google My Drive</span>
+            <span className="text-sm text-slate-600">
+              {totals.googleMyDriveAccounts.toLocaleString()} accounts · {formatBytes(totals.googleMyDriveBytes)}
+            </span>
+          </div>
+        )}
+        {totals.sharedDrives > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <span className="text-sm font-medium text-slate-700">Shared Drives</span>
+            <span className="text-sm text-slate-600">{totals.sharedDrives.toLocaleString()} drives · {formatBytes(totals.sharedDrivesBytes)}</span>
+          </div>
+        )}
+        {totals.gmailMailboxes > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <span className="text-sm font-medium text-slate-700">Gmail</span>
+            <span className="text-sm text-slate-600">
+              {totals.gmailMailboxes.toLocaleString()} mailboxes · {totals.gmailItems.toLocaleString()} messages
+            </span>
+          </div>
+        )}
+        {totals.googleChatSpaces > 0 && (
+          <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+            <span className="text-sm font-medium text-slate-700">Google Chat</span>
+            <span className="text-sm text-slate-600">{totals.googleChatSpaces.toLocaleString()} spaces</span>
           </div>
         )}
 

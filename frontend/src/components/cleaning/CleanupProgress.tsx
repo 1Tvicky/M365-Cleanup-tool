@@ -330,7 +330,7 @@ export function CleanupProgressView({ operationId, onFinished }: { operationId: 
   return (
     <div className="mx-auto max-w-2xl px-8 py-10">
       <h2 className="mb-1 flex items-center gap-2 text-lg font-semibold text-slate-800">
-        Cleaning Microsoft 365
+        Cleanup in progress
         {isRunning && <Spinner className="h-4 w-4" />}
       </h2>
       <p className="mb-6 text-sm text-slate-500">{isRunning ? "This runs in the background — you can leave this page and come back." : "Finishing up…"}</p>
