@@ -40,8 +40,20 @@ import { CleanupProgressView } from "../components/cleaning/CleanupProgress";
 import { CleanupResultsView } from "../components/cleaning/CleanupResults";
 import { formatBytes, formatDate } from "../utils/format";
 
+/** Which vendor a tenant group belongs to — a tenant is always exactly one vendor (see the backend's tenants CHECK constraint), so this is what actually distinguishes two connections that happen to share the same domain string, not the domain alone. */
+type Provider = "m365" | "google";
+
+const GOOGLE_WORKLOAD_TYPES = new Set<CleaningConnectionRow["cloudType"]>(["google_my_drive", "shared_drive", "google_chat", "gmail"]);
+
+function cloudProvider(cloudType: CleaningConnectionRow["cloudType"]): Provider {
+  return GOOGLE_WORKLOAD_TYPES.has(cloudType) ? "google" : "m365";
+}
+
+const PROVIDER_LABEL: Record<Provider, string> = { m365: "Microsoft 365", google: "Google Workspace" };
+
 interface TenantGroup {
   domain: string;
+  provider: Provider;
   adminEmail: string;
   adminDisplayName: string | null;
   status: CleaningConnectionRow["status"];
@@ -95,39 +107,44 @@ const URL_SYNCED_VIEWS = new Set<View>([
 
 function cleaningUrlFor(view: View, activeGroup: TenantGroup | null): string {
   if (view === "landing" || !activeGroup) return "/cleaning";
-  const params = new URLSearchParams({ group: activeGroup.domain, view });
+  const params = new URLSearchParams({ group: activeGroup.domain, provider: activeGroup.provider, view });
   return `/cleaning?${params.toString()}`;
 }
 
-/** Reads `?group=&view=` back out, resolving `group` against the just-loaded list — used both on initial mount (deep link / reload) and browser Back/Forward. Falls back to Landing whenever the URL doesn't name a real, currently-visible group. */
+/** Reads `?group=&provider=&view=` back out, resolving `group`+`provider` together against the just-loaded list (domain alone is ambiguous once an M365 tenant and a Google customer share the same domain string) — used both on initial mount (deep link / reload) and browser Back/Forward. A URL missing `provider` (an old bookmark from before this field existed) falls back to matching on domain alone. Falls back to Landing whenever the URL doesn't name a real, currently-visible group. */
 function cleaningStateFromUrl(groups: TenantGroup[]): { view: View; group: TenantGroup | null } {
   const params = new URLSearchParams(window.location.search);
   const domain = params.get("group");
+  const provider = params.get("provider");
   const urlView = params.get("view") as View | null;
-  const group = domain ? groups.find((g) => g.domain === domain) ?? null : null;
+  const group = domain ? groups.find((g) => g.domain === domain && (!provider || g.provider === provider)) ?? null : null;
   if (!group || !urlView || !URL_SYNCED_VIEWS.has(urlView) || urlView === "landing") {
     return { view: "landing", group: null };
   }
   return { view: urlView, group };
 }
 
+/** Groups by (domain, vendor) — never domain alone. An M365 tenant and a Google Workspace customer for the same real-world company are two independent `tenants` rows (see the backend's tenant-per-vendor invariant) that happen to share a domain string; merging them by domain alone would show one company's Google Chat tile inside what's meant to be its Microsoft 365 dashboard, and vice versa. */
 function groupConnectionsByDomain(connections: CleaningConnectionRow[]): TenantGroup[] {
-  const byDomain = new Map<string, TenantGroup>();
+  const byKey = new Map<string, TenantGroup>();
   for (const c of connections) {
-    if (!byDomain.has(c.displayName)) {
-      byDomain.set(c.displayName, {
+    const provider = cloudProvider(c.cloudType);
+    const key = `${c.displayName}::${provider}`;
+    if (!byKey.has(key)) {
+      byKey.set(key, {
         domain: c.displayName,
+        provider,
         adminEmail: c.adminEmail,
         adminDisplayName: c.adminDisplayName,
         status: c.status,
         lastSyncedAt: c.lastSyncedAt,
       });
     }
-    const group = byDomain.get(c.displayName)!;
+    const group = byKey.get(key)!;
     group[c.cloudType] = c;
     if (c.lastSyncedAt && (!group.lastSyncedAt || c.lastSyncedAt > group.lastSyncedAt)) group.lastSyncedAt = c.lastSyncedAt;
   }
-  return [...byDomain.values()];
+  return [...byKey.values()];
 }
 
 /** Keeps only the entries whose key is in `foundIds` — used to drop selected rows that a sync found no longer exist in Microsoft 365, identified by their stable internal id, never by display name. */
@@ -272,7 +289,7 @@ export function CleaningPage({ onCleanupStarted }: { onCleanupStarted?: (operati
     listCleaningConnections().then(({ connections }) => {
       const nextGroups = groupConnectionsByDomain(connections);
       setGroups(nextGroups);
-      setActiveGroup((current) => (current ? (nextGroups.find((g) => g.domain === current.domain) ?? current) : current));
+      setActiveGroup((current) => (current ? (nextGroups.find((g) => g.domain === current.domain && g.provider === current.provider) ?? current) : current));
     });
 
     if (!activeGroup || !hasSelection(totals)) return;
@@ -588,9 +605,9 @@ function Landing({ groups, loading, onOpen }: { groups: TenantGroup[]; loading: 
         {groups.map((g) => {
           const badge = STATUS_LABEL[g.status];
           return (
-            <div key={g.domain} className="w-72 rounded-xl border border-slate-200 bg-white p-5">
+            <div key={`${g.domain}::${g.provider}`} className="w-72 rounded-xl border border-slate-200 bg-white p-5">
               <div className="mb-3 flex items-center justify-between">
-                <span className="text-sm font-semibold text-slate-800">Microsoft 365</span>
+                <span className="text-sm font-semibold text-slate-800">{PROVIDER_LABEL[g.provider]}</span>
                 <span className={`rounded-full px-2 py-0.5 text-[11px] font-medium ${badge.style}`}>{badge.label}</span>
               </div>
               <div className="space-y-1 text-sm text-slate-600">
@@ -937,8 +954,12 @@ function Dashboard({
 
   return (
     <div>
-      <h2 className="mb-5 text-base font-semibold text-slate-800">{group.domain}</h2>
+      <h2 className="mb-5 text-base font-semibold text-slate-800">
+        {group.domain} <span className="font-normal text-slate-400">— {PROVIDER_LABEL[group.provider]}</span>
+      </h2>
       <div className="flex flex-wrap gap-4">
+      {group.provider === "m365" && (
+        <>
         <ServiceCard
           icon="☁️"
           name="OneDrive"
@@ -1047,6 +1068,10 @@ function Dashboard({
             )
           }
         />
+        </>
+      )}
+      {group.provider === "google" && (
+        <>
         <ServiceCard
           icon="🔷"
           name="Google My Drive"
@@ -1150,6 +1175,8 @@ function Dashboard({
           // Same deferred inline "Sync Now" shortcut as Google My Drive above — see that card's comment.
           syncControl={group.google_chat && <span className="text-xs text-slate-400">Use Manage Clouds → Resync to sync</span>}
         />
+        </>
+      )}
       </div>
     </div>
   );
