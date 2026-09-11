@@ -1,5 +1,6 @@
 import { useMemo, useState } from "react";
 import type { CleaningChannelRow, CountStatus } from "../../api/cleaning";
+import { PageFooter } from "./DiscoveryTable";
 
 /** Never a bare "0" when the real count isn't known yet — always one of these friendly phrases instead. */
 function messageCountLabel(row: CleaningChannelRow): string {
@@ -51,6 +52,10 @@ export function TeamsChannels({
   onToggle,
   selectedTeams,
   onToggleTeam,
+  page,
+  totalPages,
+  total,
+  onGoToPage,
 }: {
   channels: CleaningChannelRow[];
   loading: boolean;
@@ -62,6 +67,11 @@ export function TeamsChannels({
   /** team_id values currently selected for whole-Team deletion. */
   selectedTeams: Set<string>;
   onToggleTeam: (teamId: string, teamName: string, channelCount: number) => void;
+  /** `channels` is only the current page's rows (routes/cleaning.ts's teams/channels endpoint) — these back the same page-jump footer every other discovery table uses, so a connection with more channels than fit on one page is actually reachable instead of silently truncated. */
+  page: number;
+  totalPages: number;
+  total: number;
+  onGoToPage: (page: number) => void;
 }) {
   const [expanded, setExpanded] = useState<Set<string>>(new Set());
 
@@ -153,6 +163,10 @@ export function TeamsChannels({
             );
           })}
         </div>
+      )}
+
+      {!loading && !error && total > 0 && (
+        <PageFooter page={page} totalPages={totalPages} total={total} onGoToPage={onGoToPage} disabled={loading} />
       )}
     </div>
   );

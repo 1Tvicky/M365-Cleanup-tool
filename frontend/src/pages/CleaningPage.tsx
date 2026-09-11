@@ -43,7 +43,7 @@ import {
   SharePointIcon,
   TeamsIcon,
 } from "../components/clouds/CloudIcons";
-import { DiscoveryTable, useDebouncedValue, type DiscoveryColumn } from "../components/cleaning/DiscoveryTable";
+import { DiscoveryTable, PageFooter, useDebouncedValue, type DiscoveryColumn } from "../components/cleaning/DiscoveryTable";
 import { TeamsChannels } from "../components/cleaning/TeamsChannels";
 import { SelectionSummary, hasSelection, messagesFragment, type SelectionTotals } from "../components/cleaning/SelectionSummary";
 import { CleanupConfirmation } from "../components/cleaning/CleanupConfirmation";
@@ -1813,28 +1813,32 @@ function TeamsView({
   setSelectedTeams: (m: Map<string, CleaningTeamRow>) => void;
 }) {
   const [search, setSearch] = useState("");
-  const [channels, setChannels] = useState<CleaningChannelRow[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [error, setError] = useState<string | null>(null);
   const [summary, setSummary] = useState<CleaningTeamsSummary | null>(null);
+  const [summaryError, setSummaryError] = useState<string | null>(null);
   const [requestingCounts, setRequestingCounts] = useState(false);
-  const debouncedSearch = useDebouncedValue(search, 300);
 
-  const refresh = useCallback(async () => {
+  // Same paged-list/DiscoveryTable-footer pattern as OneDrive/SharePoint/Outlook/Google Chat below
+  // (usePagedList + PageFooter) — channels used to be fetched as one unpaginated batch, which
+  // silently truncated any connection with more channels than that one fetch's default page size,
+  // making every team past the first page invisible and unselectable.
+  const channelsFetcher = useCallback(
+    (opts: { search?: string; page?: number; pageSize?: number }) =>
+      listTeamsChannels(connectionId, opts).then((r) => ({ rows: r.channels, total: r.total, page: r.page, pageSize: r.pageSize })),
+    [connectionId]
+  );
+  const channelsPaged = usePagedList(channelsFetcher, search);
+
+  const refreshSummary = useCallback(async () => {
     try {
-      const [{ channels: ch }, s] = await Promise.all([listTeamsChannels(connectionId, { search: debouncedSearch }), getTeamsSummary(connectionId)]);
-      setChannels(ch);
-      setSummary(s);
+      setSummary(await getTeamsSummary(connectionId));
     } catch (err) {
-      setError(err instanceof ApiClientError ? err.message : "Couldn't load Teams data. Try again.");
-    } finally {
-      setLoading(false);
+      setSummaryError(err instanceof ApiClientError ? err.message : "Couldn't load Teams data. Try again.");
     }
-  }, [connectionId, debouncedSearch]);
+  }, [connectionId]);
 
   useEffect(() => {
-    refresh();
-  }, [refresh]);
+    refreshSummary();
+  }, [refreshSummary]);
 
   const dmsFetcher = useCallback(
     (opts: { search?: string; page?: number; pageSize?: number }) =>
@@ -1844,20 +1848,27 @@ function TeamsView({
   const dms = usePagedList(dmsFetcher, search);
 
   // While discovery or message-count calculation is running, keep polling so channels/counts fill
-  // in live instead of requiring a manual refresh.
+  // in live instead of requiring a manual refresh. Re-invoking goToPage with the current page is
+  // this hook's own re-fetch mechanism (see usePagedList) — it always reloads, even when the page
+  // number itself hasn't changed.
   useEffect(() => {
     const live = summary?.structureScan?.status === "running" || summary?.structureScan?.status === "queued" ||
       summary?.countScan?.status === "running" || summary?.countScan?.status === "queued";
     if (!live) return;
-    const timer = setTimeout(refresh, 3000);
+    const timer = setTimeout(() => {
+      refreshSummary();
+      channelsPaged.goToPage(channelsPaged.page);
+    }, 3000);
     return () => clearTimeout(timer);
-  }, [summary, refresh]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [summary, refreshSummary]);
 
   async function handleCalculateCounts() {
     setRequestingCounts(true);
     try {
       await calculateTeamsMessageCounts(connectionId);
-      await refresh();
+      await refreshSummary();
+      channelsPaged.goToPage(channelsPaged.page);
     } catch {
       // A 409 here just means a count job is already running — refresh will pick up its progress.
     } finally {
@@ -1924,14 +1935,14 @@ function TeamsView({
 
       {tab === "channels" ? (
         <TeamsChannels
-          channels={channels}
-          loading={loading}
-          error={error}
+          channels={channelsPaged.rows}
+          loading={channelsPaged.loading}
+          error={channelsPaged.error ?? summaryError}
           search={search}
           onSearchChange={setSearch}
           selected={new Set(selectedChannels.keys())}
           onToggle={(id) => {
-            const row = channels.find((c) => c.id === id);
+            const row = channelsPaged.rows.find((c) => c.id === id);
             if (row) toggleInMap(selectedChannels, setSelectedChannels, id, row);
           }}
           selectedTeams={new Set(selectedTeams.keys())}
@@ -1944,7 +1955,7 @@ function TeamsView({
               // Whole-Team deletion already covers every channel under it — clear any of this
               // team's channels that were individually selected, so the selection/manifest never
               // double-counts a channel under both a Team-level and a channel-level entry.
-              const teamChannelIds = channels.filter((c) => c.teamId === teamId).map((c) => c.id);
+              const teamChannelIds = channelsPaged.rows.filter((c) => c.teamId === teamId).map((c) => c.id);
               if (teamChannelIds.some((id) => selectedChannels.has(id))) {
                 const nextChannels = new Map(selectedChannels);
                 for (const id of teamChannelIds) nextChannels.delete(id);
@@ -1953,6 +1964,10 @@ function TeamsView({
             }
             setSelectedTeams(nextTeams);
           }}
+          page={channelsPaged.page}
+          totalPages={channelsPaged.totalPages}
+          total={channelsPaged.total}
+          onGoToPage={channelsPaged.goToPage}
         />
       ) : (
         <DiscoveryTable
