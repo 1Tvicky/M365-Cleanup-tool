@@ -3,6 +3,7 @@ import { SideNav, type Page } from "./components/layout/SideNav";
 import { LoginPage } from "./pages/LoginPage";
 import { CloudsPage } from "./pages/CloudsPage";
 import { CleaningPage } from "./pages/CleaningPage";
+import { DataDumpPage } from "./pages/DataDumpPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { logout as apiLogout, me, type OperatorSummary } from "./api/auth";
 
@@ -12,10 +13,11 @@ import { logout as apiLogout, me, type OperatorSummary } from "./api/auth";
  * view/tab/detail state into the URL (query params on top of its own path) — see LoginPage's
  * `mode`, CloudsPage's `tab`, CleaningPage's `group`/`view`, and ReportsPage's `operationId`/`page`.
  */
-const PAGE_PATH: Record<Page, string> = { clouds: "/clouds", cleaning: "/cleaning", reports: "/reports" };
+const PAGE_PATH: Record<Page, string> = { clouds: "/clouds", cleaning: "/cleaning", dataDump: "/data-dump", reports: "/reports" };
 
 function pageFromPath(pathname: string): Page {
   if (pathname === "/cleaning") return "cleaning";
+  if (pathname === "/data-dump") return "dataDump";
   if (pathname === "/reports") return "reports";
   return "clouds";
 }
@@ -149,6 +151,7 @@ export default function App() {
       <main className="flex-1 overflow-y-auto">
         {page === "clouds" && <CloudsPage operator={operator} onLogout={handleLogout} />}
         {page === "cleaning" && <CleaningPage onCleanupStarted={handleCleanupStarted} />}
+        {page === "dataDump" && <DataDumpPage />}
         {page === "reports" && <ReportsPage />}
       </main>
     </div>

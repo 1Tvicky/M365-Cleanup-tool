@@ -53,6 +53,30 @@ Team, Channel, and Chat Space deletion are all immediate and permanent — Micro
 expose no recoverable/recycle-bin option for any of the three, unlike OneDrive/SharePoint/Outlook
 mail, which offer a recycle-bin-vs-permanent choice at cleanup time.
 
+## Data Dump — the inverse of Cleaning
+
+A second, separate module (own top-level nav tab, own tables, own worker, own Reports tab — never
+sharing business logic with Cleaning) that **generates** real Microsoft 365 data instead of deleting
+it: realistic OneDrive/SharePoint folders and files, Teams teams and channels, and Outlook mail/
+calendar/contacts, for demos, migration-tool testing, regression testing, and performance testing.
+The flow deliberately mirrors Cleaning's own shape — a tenant card-grid landing page, then
+Select Resources → Configure → Review → Create → Progress → Results → Report — down to reusing
+Cleaning's `DiscoveryTable` component and Add Clouds' existing resource-browser endpoint for
+resource selection.
+
+OneDrive/SharePoint's folder tree is one simple, uniform shape the operator controls with three
+numbers — total root folders, sub-folders per folder, and how many levels deep — with the chosen
+file count generated in **every** folder at every level, not leaves only. Generated documents are
+real, professional-grade content (a Project Charter with a named stakeholder table, a Budget Summary
+workbook with live formulas, a signed Master Services Agreement, a full presentation deck, etc.),
+each with its own content-matched file name, never `File1.docx`-style placeholders — an operator can
+also restrict generation to specific file types (Word/Excel/PDF/…) instead of the default mix. A
+single folder's Graph failure is isolated to just that folder's own subtree so one bad node can't
+abort an otherwise-healthy run. See [`docs/data-dump-api.md`](docs/data-dump-api.md) for the endpoint
+contract, explicit resource selection, scalability/resumability design, and which capabilities are
+genuine Microsoft Graph platform limitations (new-site creation, channel messages, historical mail
+timestamps) rather than gaps in this app.
+
 ## Architecture
 
 ```
@@ -127,3 +151,4 @@ cd frontend && npx tsc --noEmit && npx vite build   # type-check + build; no fro
 - [`docs/google-workspace-integration.md`](docs/google-workspace-integration.md) — Google service account + domain-wide delegation setup
 - [`docs/graph-api-limitations.md`](docs/graph-api-limitations.md) — known Microsoft Graph constraints (e.g. why chat messages are unsupported)
 - [`docs/rollback-safety.md`](docs/rollback-safety.md) — the mandatory pre-delete export mechanism
+- [`docs/data-dump-api.md`](docs/data-dump-api.md) — Data Dump module: endpoints, explicit resource selection, scalability, and known Graph platform limitations

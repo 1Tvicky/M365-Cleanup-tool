@@ -75,3 +75,25 @@ export async function enqueueCleanupExecutionJob(payload: CleanupExecutionJobPay
     delay: CLEANUP_EXECUTION_GRACE_PERIOD_MS,
   });
 }
+
+/**
+ * One job per Data Dump generation run (jobs/dataDumpWorker.ts) — its own queue, deliberately never
+ * sharing cleanup-execution-jobs, so a Cleanup deletion and a Data Dump generation can never end up
+ * racing for the same worker concurrency slot or being confused for one another in a queue dashboard.
+ * Payload is just the operationId (spec §46: "do not put massive configurations... into the queue
+ * payload") — the worker reloads the full DataDumpConfig from data_dump_operations.config by this id.
+ * Also used to resume a paused operation (POST /:id/resume re-enqueues the same operationId).
+ */
+export const dataDumpQueue = new Queue("data-dump-jobs", { connection });
+
+export interface DataDumpJobPayload {
+  operationId: string;
+}
+
+export async function enqueueDataDumpJob(payload: DataDumpJobPayload): Promise<void> {
+  await dataDumpQueue.add("run-data-dump", payload, {
+    attempts: 1, // per-item retries happen inside the worker via runThrottled, not at the job level
+    removeOnComplete: { age: 60 * 60 * 24 * 30 },
+    removeOnFail: false,
+  });
+}

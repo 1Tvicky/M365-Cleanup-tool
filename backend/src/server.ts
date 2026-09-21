@@ -3,6 +3,7 @@ import "./jobs/cleanupWorker.js"; // starts the BullMQ worker as a side effect o
 import "./jobs/cloudSyncWorker.js"; // ditto, for Add Clouds enumeration jobs
 import "./jobs/cleaningScanWorker.js"; // ditto, for Cleaning module discovery scans
 import "./jobs/cleanupExecutionWorker.js"; // ditto, for Cleaning module cleanup/deletion execution
+import "./jobs/dataDumpWorker.js"; // ditto, for Data Dump generation
 import { config } from "./config/index.js";
 import { recoverOrphanedJobs } from "./jobs/recoverOrphanedJobs.js";
 

@@ -238,6 +238,42 @@ since the consent still exists on Microsoft's side. Show the customer admin a di
 their tenant's `Enterprise Applications → CloudFuze M365 Data Cleanup Utility → Permissions` page
 with instructions to revoke there if they want to fully remove access.
 
+## 6a. Data Dump — permissions reused vs. newly required
+
+Data Dump (the data-generation module, the inverse of Cleaning — see `docs/data-dump-api.md`) reuses
+this app registration's existing permission grant for almost everything it does. No new consent is
+needed for:
+
+| Data Dump capability | Permission (already granted above) |
+|---|---|
+| OneDrive folder/file creation, including historical `fileSystemInfo` timestamps | `Files.ReadWrite.All` |
+| SharePoint folder/file/document-library creation in an **existing** site | `Sites.ReadWrite.All` |
+| SharePoint site-permission grants (existing tenant users only) | `Sites.ReadWrite.All` |
+| Team creation (`PUT /groups/{id}/team`) and channel creation (`POST /teams/{id}/channels`) | `Group.ReadWrite.All` — confirmed against Microsoft's own permission tables for both endpoints, which list `Group.ReadWrite.All` as an accepted (higher-privileged) application permission |
+| Team/channel membership | `Group.ReadWrite.All` / `TeamMember.ReadWrite.All` |
+| Outlook mail item creation (never sent — created directly in a folder), calendar events, contacts | `Mail.ReadWrite`, `Calendars.ReadWrite`, `Contacts.ReadWrite` |
+
+**One new permission is required only if the "Create New SharePoint Site" feature is used:**
+
+| Permission | Type | Why | Used by |
+|---|---|---|---|
+| `Sites.Create.All` | Application | Creating a brand-new SharePoint site collection — Graph only exposes this on the **beta** API (`POST /beta/sites`), not v1.0, and application-permission site creation is documented to require this specific permission, distinct from `Sites.ReadWrite.All` | Data Dump → SharePoint → "Create New Site" only |
+
+Until `Sites.Create.All` is granted and consented, every other Data Dump capability (including
+generating into existing SharePoint sites) works unchanged — only the "Create New Site" path 403s,
+with a clear error surfaced to the operator rather than a silent failure or a faked success. Because
+this permission uses the beta endpoint (Microsoft: "APIs under /beta are subject to change... not
+supported for production applications"), treat the New Site feature as experimental even once the
+permission is granted, and re-verify the request/response contract against current Microsoft
+documentation before relying on it in production.
+
+**Deliberately not implemented, even with new permissions:** posting Teams channel messages/replies
+under application permissions. `ChannelMessage.Send` is delegated-only; Microsoft restricts
+application-permission channel-message posting to a "migration mode" team-import state this app
+does not implement. No permission grant makes this work without also building that heavier
+migration-mode provisioning flow — Data Dump reports configured messages/replies as "skipped," not
+"failed," since it correctly never attempts them.
+
 ## 7. Environment separation
 
 - Separate app registrations for dev / staging / prod, each with its own client ID and secret —

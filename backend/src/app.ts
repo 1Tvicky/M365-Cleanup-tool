@@ -12,6 +12,7 @@ import { jobsRouter } from "./routes/jobs.js";
 import { cloudConnectionsRouter, m365ConnectCallbackRouter } from "./routes/cloudConnections.js";
 import { googleConnectCallbackRouter, googleConnectionsRouter } from "./routes/googleConnections.js";
 import { cleaningRouter } from "./routes/cleaning.js";
+import { dataDumpRouter } from "./routes/dataDump.js";
 import { ApiError } from "./types/index.js";
 
 export const app = express();
@@ -56,6 +57,12 @@ app.use("/api/auth/google-workspace/callback", googleConnectCallbackRouter);
 // Cleaning module (discovery phase) — read-only, reuses connections/tenant_roles from the layer
 // above. Same reasoning for living outside /api/v1: its own contract, its own namespace.
 app.use("/api/cleaning", cleaningRouter);
+
+// Data Dump module — generates real M365 data, the inverse business function of Cleaning. Its own
+// namespace, its own tables (db/migrations/017_data_dump.sql), its own worker (jobs/dataDumpWorker.ts)
+// — never nested under /api/cleaning or /api/v1/cleanup, so the two are never confused for one
+// another at the routing layer either. See routes/dataDump.ts's docstring.
+app.use("/api/data-dump", dataDumpRouter);
 
 const errorHandler: ErrorRequestHandler = (err, _req, res, _next) => {
   if (err instanceof ApiError) {

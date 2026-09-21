@@ -13,9 +13,18 @@ import {
 } from "../api/cleaning";
 import { ApiClientError } from "../api/client";
 import { formatBytes, formatDate } from "../utils/format";
+import { DataDumpHistoryTable } from "../components/dataDump/DataDumpHistoryTable";
+import { DataDumpOperationView } from "../components/dataDump/DataDumpOperationView";
+import { getDataDumpSummary, listDataDumpHistory, type DataDumpOperationRow, type DataDumpSummary } from "../api/dataDump";
 
 const PAGE_SIZE = 20;
 const TERMINAL_STATUSES = new Set<CleanupOperationStatus>(["completed", "completed_with_errors", "failed", "cancelled"]);
+
+type ReportsTab = "cleanup" | "dataDump";
+
+function readReportsTab(): ReportsTab {
+  return new URLSearchParams(window.location.search).get("reportType") === "dataDump" ? "dataDump" : "cleanup";
+}
 
 /** Reads `?operationId=&page=` back out — used on mount (deep link / reload) and on Back/Forward. */
 function reportsStateFromUrl(): { operationId: string | null; page: number } {
@@ -24,13 +33,75 @@ function reportsStateFromUrl(): { operationId: string | null; page: number } {
 }
 
 /**
- * Lists real cleanup_operations (no separate "job" model) and drills into one via a plain internal
- * list/detail switch — reuses CleanupProgressView/CleanupResultsView unchanged, exactly as they're
- * used from CleaningPage's own view switch. Owns its own URL sync (like CleaningPage does for its
- * tenant/view): `?operationId=` names the open detail (and doubles as the "Start Cleanup" redirect
- * target, set by App.tsx before this component even mounts), `?page=` names the list's current page.
+ * Reports — split into two entirely separate tabs, Cleanup Reports and Data Dump Reports (spec
+ * §31: "NON-NEGOTIABLE... do NOT show both operation types in one undifferentiated list"). Each
+ * tab renders its own operation type exclusively: this file never merges a data_dump_operations row
+ * into the same list/table component as a cleanup_operations row, and the two summary stat strips
+ * below are deliberately separate cards, never a combined "Total Jobs" figure (spec §39).
  */
 export function ReportsPage() {
+  const [tab, setTab] = useState<ReportsTab>(readReportsTab);
+  const [cleanupSummary, setCleanupSummary] = useState<CleanupOperationsSummary | null>(null);
+  const [dataDumpSummary, setDataDumpSummary] = useState<DataDumpSummary | null>(null);
+
+  useEffect(() => {
+    getCleanupOperationsSummary().then(setCleanupSummary).catch(() => {});
+    getDataDumpSummary().then(setDataDumpSummary).catch(() => {});
+  }, []);
+
+  useEffect(() => {
+    const url = tab === "dataDump" ? "/reports?reportType=dataDump" : "/reports";
+    if (`${window.location.pathname}${window.location.search}` !== url && !window.location.search.includes("operationId")) {
+      window.history.replaceState({}, "", url);
+    }
+  }, [tab]);
+
+  return (
+    <div className="mx-auto max-w-5xl px-8 py-8">
+      <h1 className="mb-1 text-xl font-semibold text-slate-900">Reports</h1>
+      <p className="mb-6 text-sm text-slate-500">Cleanup job history and Data Dump generation history — tracked separately.</p>
+
+      <div className="mb-6 grid grid-cols-1 gap-4 sm:grid-cols-2">
+        <button
+          onClick={() => setTab("cleanup")}
+          className={`rounded-xl border p-4 text-left transition-colors ${tab === "cleanup" ? "border-[#1b2fc4] bg-[#1b2fc4]/5" : "border-slate-200 bg-white hover:border-slate-300"}`}
+        >
+          <div className="text-xs uppercase tracking-wide text-slate-400">Cleanup Jobs</div>
+          <div className="mt-1 text-2xl font-semibold text-slate-900">{cleanupSummary?.totalOperations.toLocaleString() ?? "—"}</div>
+          <div className="text-xs text-slate-400">Deletion operations</div>
+        </button>
+        <button
+          onClick={() => setTab("dataDump")}
+          className={`rounded-xl border p-4 text-left transition-colors ${tab === "dataDump" ? "border-[#1b2fc4] bg-[#1b2fc4]/5" : "border-slate-200 bg-white hover:border-slate-300"}`}
+        >
+          <div className="text-xs uppercase tracking-wide text-slate-400">Data Dump Jobs</div>
+          <div className="mt-1 text-2xl font-semibold text-slate-900">{dataDumpSummary?.total.toLocaleString() ?? "—"}</div>
+          <div className="text-xs text-slate-400">Generation operations</div>
+        </button>
+      </div>
+
+      <div className="mb-6 flex gap-1 border-b border-slate-200">
+        <button
+          onClick={() => setTab("cleanup")}
+          className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${tab === "cleanup" ? "border-[#1b2fc4] text-[#1b2fc4]" : "border-transparent text-slate-500 hover:text-slate-700"}`}
+        >
+          Cleanup Reports
+        </button>
+        <button
+          onClick={() => setTab("dataDump")}
+          className={`-mb-px border-b-2 px-4 py-2 text-sm font-medium ${tab === "dataDump" ? "border-[#1b2fc4] text-[#1b2fc4]" : "border-transparent text-slate-500 hover:text-slate-700"}`}
+        >
+          Data Dump Reports
+        </button>
+      </div>
+
+      {tab === "cleanup" ? <CleanupReportsTab summary={cleanupSummary} /> : <DataDumpReportsTab />}
+    </div>
+  );
+}
+
+/** Everything below is the pre-existing Cleanup Reports implementation, unchanged in behavior — only lifted the summary fetch up to the shared parent above and relabeled it "cleanup-only" so it can never be confused with Data Dump's own summary. */
+function CleanupReportsTab({ summary }: { summary: CleanupOperationsSummary | null }) {
   const [initial] = useState(reportsStateFromUrl);
   const [operations, setOperations] = useState<CleanupOperationRow[]>([]);
   const [total, setTotal] = useState(0);
@@ -39,15 +110,9 @@ export function ReportsPage() {
   const [error, setError] = useState<string | null>(null);
   const [detailOperationId, setDetailOperationId] = useState<string | null>(initial.operationId);
   const [detailIsRunning, setDetailIsRunning] = useState(true);
-  // Tracks the previous detailOperationId so the URL-sync effect below can tell "opened/closed a
-  // detail" (worth a Back stop) apart from "just changed list page" (shouldn't be — see that effect).
   const prevDetailIdRef = useRef(initial.operationId);
   const [searchInput, setSearchInput] = useState("");
   const search = useDebouncedValue(searchInput, 400);
-  const [summary, setSummary] = useState<CleanupOperationsSummary | null>(null);
-  // Distinguishes "still loading the very first page" (worth a full-panel "Loading…") from any
-  // later load (a page change, a search) where the table itself should stay mounted and just show
-  // its own empty/row state — never regresses back to false once the first load settles.
   const [hasLoadedOnce, setHasLoadedOnce] = useState(false);
 
   function load(targetPage: number, targetSearch: string) {
@@ -63,13 +128,8 @@ export function ReportsPage() {
         setLoading(false);
         setHasLoadedOnce(true);
       });
-    getCleanupOperationsSummary()
-      .then(setSummary)
-      .catch(() => {});
   }
 
-  // A search change always starts back at page 1 — a stale page number from a differently-filtered
-  // list wouldn't make sense against the new one.
   useEffect(() => {
     setPage(1);
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -80,9 +140,6 @@ export function ReportsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [page, search]);
 
-  // Deep-link / reload with ?operationId= already in the URL — resolve whether it's still running
-  // so we land on the right sub-view without waiting for the list to load first. Only ever needs to
-  // run once for whatever the URL said at mount; openDetails/the popstate handler cover the rest.
   useEffect(() => {
     if (!initial.operationId) return;
     getCleanupProgress(initial.operationId)
@@ -91,9 +148,6 @@ export function ReportsPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Keeps the address bar naming the operation (or list page) actually on screen. Opening/closing a
-  // detail is a real navigation (pushState — worth a Back stop); paging through the list by itself
-  // is a within-page adjustment (replaceState — Back shouldn't have to click through every page).
   useEffect(() => {
     const url = detailOperationId ? `/reports?operationId=${detailOperationId}` : page > 1 ? `/reports?page=${page}` : "/reports";
     const current = `${window.location.pathname}${window.location.search}`;
@@ -131,7 +185,7 @@ export function ReportsPage() {
 
   if (detailOperationId) {
     return (
-      <div className="mx-auto max-w-3xl px-8 py-6">
+      <div>
         <button onClick={closeDetails} className="mb-2 text-sm font-medium text-[#1b2fc4] hover:underline">
           ← Back to Reports
         </button>
@@ -154,17 +208,15 @@ export function ReportsPage() {
   const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
 
   return (
-    <div className="mx-auto max-w-5xl px-8 py-8">
-      <h1 className="mb-1 text-xl font-semibold text-slate-900">Reports</h1>
-      <p className="mb-6 text-sm text-slate-500">Cleanup job history and live progress.</p>
+    <div>
       {summary && (
         <div className="mb-6 grid grid-cols-2 gap-4 rounded-xl border border-slate-200 bg-white p-5 sm:grid-cols-4">
           <div>
-            <div className="text-xs uppercase tracking-wide text-slate-400">Total Migrations</div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Total Cleanups</div>
             <div className="mt-1 text-lg font-semibold text-slate-900">{summary.totalOperations.toLocaleString()}</div>
           </div>
           <div>
-            <div className="text-xs uppercase tracking-wide text-slate-400">Processed Migrations</div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Processed Items</div>
             <div className="mt-1 text-lg font-semibold text-slate-900">{summary.processedItems.toLocaleString()}</div>
           </div>
           <div>
@@ -172,7 +224,7 @@ export function ReportsPage() {
             <div className="mt-1 text-lg font-semibold text-slate-900">{summary.totalItems.toLocaleString()}</div>
           </div>
           <div>
-            <div className="text-xs uppercase tracking-wide text-slate-400">Processed Data Size</div>
+            <div className="text-xs uppercase tracking-wide text-slate-400">Deleted Data Size</div>
             <div className="mt-1 text-lg font-semibold text-slate-900">{formatBytes(summary.bytesCleared)}</div>
           </div>
           <div className="col-span-2 text-xs text-slate-400 sm:col-span-4">Updated {formatDate(summary.updatedAt)}</div>
@@ -197,5 +249,71 @@ export function ReportsPage() {
         />
       )}
     </div>
+  );
+}
+
+/** Data Dump Reports — its own list/detail, its own summary, never mixed with Cleanup Reports above (spec §31/§32/§33). */
+function DataDumpReportsTab() {
+  const [operations, setOperations] = useState<DataDumpOperationRow[]>([]);
+  const [total, setTotal] = useState(0);
+  const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [detailId, setDetailId] = useState<string | null>(null);
+  const [searchInput, setSearchInput] = useState("");
+  const search = useDebouncedValue(searchInput, 400);
+
+  function load() {
+    setLoading(true);
+    listDataDumpHistory({ page, pageSize: PAGE_SIZE, search: search || undefined })
+      .then((res) => {
+        setOperations(res.operations);
+        setTotal(res.total);
+        setError(null);
+      })
+      .catch((err) => setError(err instanceof ApiClientError ? err.message : "Couldn't load Data Dump reports."))
+      .finally(() => setLoading(false));
+  }
+
+  useEffect(() => {
+    setPage(1);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [search]);
+
+  useEffect(() => {
+    load();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [page, search]);
+
+  if (detailId) {
+    return (
+      <div>
+        <DataDumpOperationView
+          operationId={detailId}
+          onClose={() => {
+            setDetailId(null);
+            load();
+          }}
+        />
+      </div>
+    );
+  }
+
+  const totalPages = Math.max(1, Math.ceil(total / PAGE_SIZE));
+
+  if (error) return <p className="rounded-xl border border-slate-200 bg-white px-4 py-8 text-center text-sm text-rose-600">{error}</p>;
+
+  return (
+    <DataDumpHistoryTable
+      operations={operations}
+      onViewDetails={setDetailId}
+      page={page}
+      totalPages={totalPages}
+      total={total}
+      onGoToPage={setPage}
+      loading={loading}
+      search={searchInput}
+      onSearchChange={setSearchInput}
+    />
   );
 }

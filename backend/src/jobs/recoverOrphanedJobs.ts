@@ -47,10 +47,28 @@ export async function recoverOrphanedJobs(): Promise<void> {
     orphanedItemCount = orphanedItems.rowCount ?? 0;
   }
 
-  const total = syncJobs.rows.length + scans.rows.length + cleanups.rows.length;
+  // Same "queued/running at boot cannot belong to this process" reasoning, applied to Data Dump
+  // (jobs/dataDumpWorker.ts) — a workload task frozen mid-generation by a crash must not be left
+  // silently stuck at 'running' forever with no way for an operator to tell it's actually dead.
+  // Unlike Cleanup, a Data Dump operation is NOT flipped to a hard 'failed' here — it's flipped to
+  // 'paused' instead, since (a) partially-generated data is a normal, safe, resumable state (not a
+  // destructive-audit concern the way an interrupted cleanup is), and (b) the containers/batches
+  // already recorded make it directly resumable via POST /:id/resume, which is the ordinary
+  // operator recovery action for a stalled run, not a "start over" one.
+  const dataDumpOps = await query<{ id: string }>(
+    `UPDATE data_dump_operations SET status = 'paused', pause_requested_at = now()
+     WHERE status IN ('queued', 'running') RETURNING id`
+  );
+  const dataDumpTasks = await query(
+    `UPDATE data_dump_workload_tasks SET status = 'paused'
+     WHERE status = 'running' AND operation_id = ANY($1::uuid[])`,
+    [dataDumpOps.rows.map((r) => r.id)]
+  );
+
+  const total = syncJobs.rows.length + scans.rows.length + cleanups.rows.length + dataDumpOps.rows.length;
   if (total > 0) {
     console.warn(
-      `[recovery] marked ${total} orphaned job(s) as failed on startup (sync: ${syncJobs.rows.length}, scans: ${scans.rows.length}, cleanups: ${cleanups.rows.length}, cleanup items: ${orphanedItemCount})`
+      `[recovery] marked ${total} orphaned job(s) as failed/paused on startup (sync: ${syncJobs.rows.length}, scans: ${scans.rows.length}, cleanups: ${cleanups.rows.length}, cleanup items: ${orphanedItemCount}, data dump operations paused: ${dataDumpOps.rows.length}, tasks: ${dataDumpTasks.rowCount ?? 0})`
     );
   }
 }
